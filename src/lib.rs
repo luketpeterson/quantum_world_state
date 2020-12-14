@@ -157,7 +157,6 @@ pub struct QWSTransaction {
 
 //private: A struct that is used internally to hold onto the elements in the QuantumWorldState
 struct QWSElementRecord {
-    id : QWSElementID,
     element : Box<dyn QWSElement>, //The data represented by this element
     created_by : QWSTransactionID, //The transaction that created this QWSElement
 }
@@ -294,9 +293,9 @@ impl  <T : 'static>QWSElement for QWSElementWrapper<T> {
 
 impl QWSElementRecord {
 
-    fn new(element : Box<dyn QWSElement>, parent_transaction : QWSTransactionID, new_element_id : QWSElementID) -> QWSElementRecord {
+    fn new(element : Box<dyn QWSElement>, parent_transaction : QWSTransactionID, _new_element_id : QWSElementID) -> QWSElementRecord {
         QWSElementRecord {
-            id : new_element_id,
+            //NOTE: we are keeping the option open to record the QWSElementID in the ElementRecord, but for now there is no use for it.
             element : element,
             created_by : parent_transaction,
         }
@@ -503,12 +502,13 @@ impl <'a>QWSPartiallyCollapsedState<'a> {
             data_view : quantum_world.uncollapsed_view.clone()
         };
 
-        new_partially_collapsed_state.collapse_transactions(target_transactions)?;
+        //And then collapse it around the transactions provided
+        new_partially_collapsed_state.continue_collapse(target_transactions)?;
 
         Ok(new_partially_collapsed_state)
     }
 
-    pub fn collapse_transactions(&mut self, target_transactions : &[QWSTransactionID]) -> Result<(), QWSError> {
+    pub fn continue_collapse(&mut self, target_transactions : &[QWSTransactionID]) -> Result<(), QWSError> {
 
         //Loop over the elements, and further collapse the data_view around each one
         for transaction_id in target_transactions.into_iter() {
@@ -537,6 +537,10 @@ impl <'a>QWSPartiallyCollapsedState<'a> {
         } else {
             QWSElementStatus::Unknown
         }
+    }
+
+    pub fn get_collapsed_transactions(&self) -> &[QWSTransactionID] {
+        &self.collapsed_transactions[..]
     }
 
     pub fn query_by_type(&self, element_type : QWSElementType) -> Vec<QWSElementID> {
@@ -946,7 +950,7 @@ mod tests {
 
         //Further collapse around B1, and confirm the other elements are in the state we'd expect
         let b1_trans_id = quantum_world_state.get_creator_transaction(b1_id).unwrap().id();
-        collapsed_world.collapse_transactions(&vec![b1_trans_id]).unwrap();
+        collapsed_world.continue_collapse(&vec![b1_trans_id]).unwrap();
         assert_eq!(collapsed_world.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
         assert_eq!(collapsed_world.get_element_status(a2_id), QWSElementStatus::KnownAbsent);
         assert_eq!(collapsed_world.get_element_status(a3_id), QWSElementStatus::KnownPresent);
@@ -1019,7 +1023,7 @@ mod tests {
 
         //Further collapse around B2, and confirm that we don't hit an error, and that everything is in the state we'd expect
         let t2_id = quantum_world_state.get_creator_transaction(b2_id).unwrap().id();
-        collapsed_world.collapse_transactions(&vec![t2_id]).unwrap();
+        collapsed_world.continue_collapse(&vec![t2_id]).unwrap();
         assert_eq!(collapsed_world.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
         assert_eq!(collapsed_world.get_element_status(b1_id), QWSElementStatus::KnownAbsent);
         assert_eq!(collapsed_world.get_element_status(a2_id), QWSElementStatus::KnownPresent);
@@ -1132,11 +1136,11 @@ mod tests {
 
         //Try the same thing through the "continued collapse" call
         let mut collapsed_world = quantum_world_state.partially_collapse(&vec![t1_id]).unwrap();
-        assert!(collapsed_world.collapse_transactions(&vec![t2_id]).is_err(), "elements should not be allowed to coexist!");
+        assert!(collapsed_world.continue_collapse(&vec![t2_id]).is_err(), "elements should not be allowed to coexist!");
         let mut collapsed_world = quantum_world_state.partially_collapse(&vec![t0_id]).unwrap();
-        assert!(collapsed_world.collapse_transactions(&vec![t3_id]).is_err(), "elements should not be allowed to coexist!");
+        assert!(collapsed_world.continue_collapse(&vec![t3_id]).is_err(), "elements should not be allowed to coexist!");
         let mut collapsed_world = quantum_world_state.partially_collapse(&vec![t3_id]).unwrap();
-        assert!(collapsed_world.collapse_transactions(&vec![t4_id]).is_err(), "elements should not be allowed to coexist!");
+        assert!(collapsed_world.continue_collapse(&vec![t4_id]).is_err(), "elements should not be allowed to coexist!");
 
         //Finally, test that we also cannot create a transaction based on conflicting entangled elements
         assert!(quantum_world_state.add_transaction(&[a1_id], &[b1_id], vec![
