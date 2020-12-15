@@ -148,8 +148,9 @@ pub struct QuantumWorldState {
         //change in the future.
 }
 
-//A partially collapsed world state
-pub struct QWSPartiallyCollapsedState<'a> {
+//A view into the QuantumWorldState that may represent a partially collapsed for fully collapsed world, and
+//  may also represent a query
+pub struct QWSDataView<'a> {
 
     quantum_world : &'a QuantumWorldState,
     collapsed_transactions : Vec<QWSTransactionID>,
@@ -463,11 +464,11 @@ impl QuantumWorldState {
         Ok(our_transaction_record)
     }
 
-    //Returns a pertially collapsed state in which each of the supplied elements exists.  Therefore any other elements that are entangled
-    //  with the supplied target elements will either be known to exist or be known not to exist.  If two or more of the supplied target
-    //  elements cannot exist at the same epoch, then this function will return None.
-    pub fn partially_collapse(&self, target_transactions : &[QWSTransactionID]) -> Result<QWSPartiallyCollapsedState, QWSError> {
-        QWSPartiallyCollapsedState::new(self, target_transactions)
+    //Returns a pertially collapsed view in which each of the supplied transactions occurred.  Therefore all other elements that are entangled
+    //  with the supplied transactions will either be known to exist or be known not to exist.  If two or more of the supplied transactions
+    //  reference elements that cannot exist at the same epoch, then this function will return None.
+    pub fn new_view(&self, collapse_transactions : &[QWSTransactionID]) -> Result<QWSDataView, QWSError> {
+        QWSDataView::new(self, collapse_transactions)
     }
 
     //An internal function to propagate transactions backwards, bringing the mask to to date with all transaction in the QuantumWorld
@@ -528,28 +529,28 @@ impl QuantumWorldState {
 
 }
 
-impl <'a>QWSPartiallyCollapsedState<'a> {
+impl <'a>QWSDataView<'a> {
 
-    pub fn new(quantum_world : &'a QuantumWorldState, target_transactions : &[QWSTransactionID]) -> Result<QWSPartiallyCollapsedState<'a>, QWSError> {
+    fn new(quantum_world : &'a QuantumWorldState, collapse_transactions : &[QWSTransactionID]) -> Result<QWSDataView<'a>, QWSError> {
 
         //Create our new partially collapsed mask
         //Start with a data_mask for every element in superposition, that represents the QuantumWorldState in totality
-        let mut new_partially_collapsed_state = QWSPartiallyCollapsedState {
+        let mut new_data_view = QWSDataView {
             quantum_world : quantum_world,
-            collapsed_transactions : target_transactions.to_vec(),
+            collapsed_transactions : collapse_transactions.to_vec(),
             data_mask : quantum_world.uncollapsed_mask.clone()
         };
 
         //And then collapse it around the transactions provided
-        new_partially_collapsed_state.continue_collapse(target_transactions)?;
+        new_data_view.collapse_further(collapse_transactions)?;
 
-        Ok(new_partially_collapsed_state)
+        Ok(new_data_view)
     }
 
-    pub fn continue_collapse(&mut self, target_transactions : &[QWSTransactionID]) -> Result<(), QWSError> {
+    pub fn collapse_further(&mut self, collapse_transactions : &[QWSTransactionID]) -> Result<(), QWSError> {
 
         //Loop over the elements, and further collapse the data_mask around each one
-        for transaction_id in target_transactions.into_iter() {
+        for transaction_id in collapse_transactions.into_iter() {
 
             let transaction_record = &self.quantum_world.transactions[transaction_id.0];
 
@@ -919,8 +920,8 @@ mod tests {
         let transaction = quantum_world_state.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "Zero"))]).unwrap();
         let &zero_id = transaction.created_elements().first().unwrap();
         let zero_trans_id = transaction.id();
-        let collapsed_world = quantum_world_state.partially_collapse(&vec![zero_trans_id]).unwrap();
-        assert_eq!(collapsed_world.get_element_status(zero_id), QWSElementStatus::KnownPresent);
+        let collapsed_view = quantum_world_state.new_view(&vec![zero_trans_id]).unwrap();
+        assert_eq!(collapsed_view.get_element_status(zero_id), QWSElementStatus::KnownPresent);
 
         //Add element "One" through a transaction that deletes element "Zero"
         //Then collapse around element "One", and confirm that it's KnownPresent
@@ -928,32 +929,32 @@ mod tests {
         let transaction = quantum_world_state.add_transaction(&vec![zero_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "One"))]).unwrap();
         let &one_id = transaction.created_elements().first().unwrap();
         let one_trans_id = transaction.id();
-        let collapsed_world = quantum_world_state.partially_collapse(&vec![one_trans_id]).unwrap();
-        assert_eq!(collapsed_world.get_element_status(one_id), QWSElementStatus::KnownPresent);
+        let collapsed_view = quantum_world_state.new_view(&vec![one_trans_id]).unwrap();
+        assert_eq!(collapsed_view.get_element_status(one_id), QWSElementStatus::KnownPresent);
 
         //Confirm that element "Zero" is KnownAbsent
         //This tests that we can delete an element sucessfully
-        assert_eq!(collapsed_world.get_element_status(zero_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(zero_id), QWSElementStatus::KnownAbsent);
 
         //Collapse around element "Zero", and confirm that element "Zero" is now KnownPresent
         //This tests that we can collapse around an element to arrive at an epoch that isn't the latest
-        let collapsed_world = quantum_world_state.partially_collapse(&vec![zero_trans_id]).unwrap();
-        assert_eq!(collapsed_world.get_element_status(zero_id), QWSElementStatus::KnownPresent);
+        let collapsed_view = quantum_world_state.new_view(&vec![zero_trans_id]).unwrap();
+        assert_eq!(collapsed_view.get_element_status(zero_id), QWSElementStatus::KnownPresent);
 
         //Confirm element "One", that was added after the element "Zero" transaction is KnownAbsent.
         //This tests the logic to back-propagate future transactions to prior epochs.
-        assert_eq!(collapsed_world.get_element_status(one_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(one_id), QWSElementStatus::KnownAbsent);
 
         //Confirm that we get an error if we try to collapse around element "One" and element "Two"
         //  at the same time because they can't coexist in the same epoch
-        assert!(quantum_world_state.partially_collapse(&vec![zero_trans_id, one_trans_id]).is_err(), "elements should not be allowed to coexist!");
+        assert!(quantum_world_state.new_view(&vec![zero_trans_id, one_trans_id]).is_err(), "elements should not be allowed to coexist!");
 
         //Add a third element, "Two", that destroys element "One", and confirm that when we query the collapsed state we only get the one result
         let transaction = quantum_world_state.add_transaction(&vec![one_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "Two"))]).unwrap();
         let &two_id = transaction.created_elements().first().unwrap();
         let two_trans_id = transaction.id();
-        let collapsed_world = quantum_world_state.partially_collapse(&vec![two_trans_id]).unwrap();
-        let results = collapsed_world.query_by_type(QWSElementType::GenericText);
+        let collapsed_view = quantum_world_state.new_view(&vec![two_trans_id]).unwrap();
+        let results = collapsed_view.query_by_type(QWSElementType::GenericText);
         assert_eq!(results.len(), 1);
         //assert_eq!(two_id, results[0]); BORIS, Querying needs to actually work for this to succeed.
     }
@@ -978,33 +979,33 @@ mod tests {
 
         //Partially collapse around A3, and confirm the other elements are in the state we'd expect
         let a3_trans_id = quantum_world_state.get_creator_transaction(a3_id).unwrap().id();
-        let mut collapsed_world = quantum_world_state.partially_collapse(&vec![a3_trans_id]).unwrap();
-        assert_eq!(collapsed_world.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(a2_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(a3_id), QWSElementStatus::KnownPresent);
-        assert_eq!(collapsed_world.get_element_status(b1_id), QWSElementStatus::Superposition);
-        assert_eq!(collapsed_world.get_element_status(b2_id), QWSElementStatus::Superposition);
-        assert_eq!(collapsed_world.get_element_status(b3_id), QWSElementStatus::Superposition);
+        let mut collapsed_view = quantum_world_state.new_view(&vec![a3_trans_id]).unwrap();
+        assert_eq!(collapsed_view.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(a2_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(a3_id), QWSElementStatus::KnownPresent);
+        assert_eq!(collapsed_view.get_element_status(b1_id), QWSElementStatus::Superposition);
+        assert_eq!(collapsed_view.get_element_status(b2_id), QWSElementStatus::Superposition);
+        assert_eq!(collapsed_view.get_element_status(b3_id), QWSElementStatus::Superposition);
 
         //Further collapse around B1, and confirm the other elements are in the state we'd expect
         let b1_trans_id = quantum_world_state.get_creator_transaction(b1_id).unwrap().id();
-        collapsed_world.continue_collapse(&vec![b1_trans_id]).unwrap();
-        assert_eq!(collapsed_world.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(a2_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(a3_id), QWSElementStatus::KnownPresent);
-        assert_eq!(collapsed_world.get_element_status(b1_id), QWSElementStatus::KnownPresent);
-        assert_eq!(collapsed_world.get_element_status(b2_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(b3_id), QWSElementStatus::KnownAbsent);
+        collapsed_view.collapse_further(&vec![b1_trans_id]).unwrap();
+        assert_eq!(collapsed_view.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(a2_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(a3_id), QWSElementStatus::KnownPresent);
+        assert_eq!(collapsed_view.get_element_status(b1_id), QWSElementStatus::KnownPresent);
+        assert_eq!(collapsed_view.get_element_status(b2_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(b3_id), QWSElementStatus::KnownAbsent);
 
         //Partially collapse only around B3, and confirm the other elements are in the state we'd expect
         let b3_trans_id = quantum_world_state.get_creator_transaction(b3_id).unwrap().id();
-        let collapsed_world = quantum_world_state.partially_collapse(&vec![b3_trans_id]).unwrap();
-        assert_eq!(collapsed_world.get_element_status(a1_id), QWSElementStatus::Superposition);
-        assert_eq!(collapsed_world.get_element_status(a2_id), QWSElementStatus::Superposition);
-        assert_eq!(collapsed_world.get_element_status(a3_id), QWSElementStatus::Superposition);
-        assert_eq!(collapsed_world.get_element_status(b1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(b2_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(b3_id), QWSElementStatus::KnownPresent);
+        let collapsed_view = quantum_world_state.new_view(&vec![b3_trans_id]).unwrap();
+        assert_eq!(collapsed_view.get_element_status(a1_id), QWSElementStatus::Superposition);
+        assert_eq!(collapsed_view.get_element_status(a2_id), QWSElementStatus::Superposition);
+        assert_eq!(collapsed_view.get_element_status(a3_id), QWSElementStatus::Superposition);
+        assert_eq!(collapsed_view.get_element_status(b1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(b2_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(b3_id), QWSElementStatus::KnownPresent);
         
     }
 
@@ -1045,38 +1046,38 @@ mod tests {
             .unwrap().created_elements().first().unwrap();
         
         //Just a sanity check, collapse the first transaction and confirm the other elements are in the state we'd expect
-        let collapsed_world = quantum_world_state.partially_collapse(&vec![t0_id]).unwrap();
-        assert_eq!(collapsed_world.get_element_status(a1_id), QWSElementStatus::KnownPresent);
-        assert_eq!(collapsed_world.get_element_status(b1_id), QWSElementStatus::KnownPresent);
-        assert_eq!(collapsed_world.get_element_status(a2_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(b2_id), QWSElementStatus::KnownAbsent);
+        let collapsed_view = quantum_world_state.new_view(&vec![t0_id]).unwrap();
+        assert_eq!(collapsed_view.get_element_status(a1_id), QWSElementStatus::KnownPresent);
+        assert_eq!(collapsed_view.get_element_status(b1_id), QWSElementStatus::KnownPresent);
+        assert_eq!(collapsed_view.get_element_status(a2_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(b2_id), QWSElementStatus::KnownAbsent);
 
         //Partially collapse transaction T1, and confirm the other elements are in the state we'd expect
         let t1_id = quantum_world_state.get_creator_transaction(a2_id).unwrap().id();
-        let mut collapsed_world = quantum_world_state.partially_collapse(&vec![t1_id]).unwrap();
-        assert_eq!(collapsed_world.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(a2_id), QWSElementStatus::KnownPresent);
-        assert_eq!(collapsed_world.get_element_status(b1_id), QWSElementStatus::Superposition);
-        assert_eq!(collapsed_world.get_element_status(b2_id), QWSElementStatus::Superposition);
+        let mut collapsed_view = quantum_world_state.new_view(&vec![t1_id]).unwrap();
+        assert_eq!(collapsed_view.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(a2_id), QWSElementStatus::KnownPresent);
+        assert_eq!(collapsed_view.get_element_status(b1_id), QWSElementStatus::Superposition);
+        assert_eq!(collapsed_view.get_element_status(b2_id), QWSElementStatus::Superposition);
 
         //Further collapse around B2, and confirm that we don't hit an error, and that everything is in the state we'd expect
         let t2_id = quantum_world_state.get_creator_transaction(b2_id).unwrap().id();
-        collapsed_world.continue_collapse(&vec![t2_id]).unwrap();
-        assert_eq!(collapsed_world.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(b1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(a2_id), QWSElementStatus::KnownPresent);
-        assert_eq!(collapsed_world.get_element_status(b2_id), QWSElementStatus::KnownPresent);
+        collapsed_view.collapse_further(&vec![t2_id]).unwrap();
+        assert_eq!(collapsed_view.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(b1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(a2_id), QWSElementStatus::KnownPresent);
+        assert_eq!(collapsed_view.get_element_status(b2_id), QWSElementStatus::KnownPresent);
 
         //Create T3, entangling A2 & B2, and confirm everything is the way it ought to be
         let t3_id = quantum_world_state.add_transaction(&vec![], &[a2_id, b2_id], vec![Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "C1"))])
             .unwrap().id();
         let c1_id = quantum_world_state.get_transaction(t3_id).unwrap().created_elements()[0];
-        let collapsed_world = quantum_world_state.partially_collapse(&vec![t3_id]).unwrap();
-        assert_eq!(collapsed_world.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(b1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(a2_id), QWSElementStatus::KnownPresent);
-        assert_eq!(collapsed_world.get_element_status(b2_id), QWSElementStatus::KnownPresent);
-        assert_eq!(collapsed_world.get_element_status(c1_id), QWSElementStatus::KnownPresent);
+        let collapsed_view = quantum_world_state.new_view(&vec![t3_id]).unwrap();
+        assert_eq!(collapsed_view.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(b1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(a2_id), QWSElementStatus::KnownPresent);
+        assert_eq!(collapsed_view.get_element_status(b2_id), QWSElementStatus::KnownPresent);
+        assert_eq!(collapsed_view.get_element_status(c1_id), QWSElementStatus::KnownPresent);
     }
 
     #[test]
@@ -1113,23 +1114,23 @@ mod tests {
         
         //When we collapse around A1, we should see both B1 & C1 as absent because it's impossible to create either without
         //  destroying A1
-        let collapsed_world = quantum_world_state.partially_collapse(&vec![t0_id]).unwrap();
-        assert_eq!(collapsed_world.get_element_status(a1_id), QWSElementStatus::KnownPresent);
-        assert_eq!(collapsed_world.get_element_status(b1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(c1_id), QWSElementStatus::KnownAbsent);
+        let collapsed_view = quantum_world_state.new_view(&vec![t0_id]).unwrap();
+        assert_eq!(collapsed_view.get_element_status(a1_id), QWSElementStatus::KnownPresent);
+        assert_eq!(collapsed_view.get_element_status(b1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(c1_id), QWSElementStatus::KnownAbsent);
 
         //Now when we collapse around B1, we should see that A1 is absent (we deleted it), but C1 is also absent because it's
         //  impossible to have created it.
-        let collapsed_world = quantum_world_state.partially_collapse(&vec![t1_id]).unwrap();
-        assert_eq!(collapsed_world.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(b1_id), QWSElementStatus::KnownPresent);
-        assert_eq!(collapsed_world.get_element_status(c1_id), QWSElementStatus::KnownAbsent);
+        let collapsed_view = quantum_world_state.new_view(&vec![t1_id]).unwrap();
+        assert_eq!(collapsed_view.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(b1_id), QWSElementStatus::KnownPresent);
+        assert_eq!(collapsed_view.get_element_status(c1_id), QWSElementStatus::KnownAbsent);
 
         //Now test the reverse, collapse around C1, and confirm B1 is absent
-        let collapsed_world = quantum_world_state.partially_collapse(&vec![t2_id]).unwrap();
-        assert_eq!(collapsed_world.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(b1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(c1_id), QWSElementStatus::KnownPresent);
+        let collapsed_view = quantum_world_state.new_view(&vec![t2_id]).unwrap();
+        assert_eq!(collapsed_view.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(b1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(c1_id), QWSElementStatus::KnownPresent);
 
         //Now Create C2, that deletes C1
         let t3_id = quantum_world_state.add_transaction(&[c1_id], &[], vec![
@@ -1138,11 +1139,11 @@ mod tests {
         let c2_id = quantum_world_state.get_transaction(t3_id).unwrap().created_elements()[0];
         
         //Collapse around C2, and confirm everything is the way we'd expect it
-        let collapsed_world = quantum_world_state.partially_collapse(&vec![t3_id]).unwrap();
-        assert_eq!(collapsed_world.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(b1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(c1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(c2_id), QWSElementStatus::KnownPresent);
+        let collapsed_view = quantum_world_state.new_view(&vec![t3_id]).unwrap();
+        assert_eq!(collapsed_view.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(b1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(c1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(c2_id), QWSElementStatus::KnownPresent);
 
         //Now Create D1, forking again from T0 by deleting A1
         let t4_id = quantum_world_state.add_transaction(&[a1_id], &[], vec![
@@ -1151,34 +1152,34 @@ mod tests {
         let d1_id = quantum_world_state.get_transaction(t4_id).unwrap().created_elements()[0];
 
         //Collapse around D1, and confirm everything is the way we'd expect it
-        let collapsed_world = quantum_world_state.partially_collapse(&vec![t4_id]).unwrap();
-        assert_eq!(collapsed_world.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(b1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(c1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(c2_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(d1_id), QWSElementStatus::KnownPresent);
+        let collapsed_view = quantum_world_state.new_view(&vec![t4_id]).unwrap();
+        assert_eq!(collapsed_view.get_element_status(a1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(b1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(c1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(c2_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(d1_id), QWSElementStatus::KnownPresent);
 
         //Collapse T0 again, we should see all other elements as absent
-        let collapsed_world = quantum_world_state.partially_collapse(&vec![t0_id]).unwrap();
-        assert_eq!(collapsed_world.get_element_status(a1_id), QWSElementStatus::KnownPresent);
-        assert_eq!(collapsed_world.get_element_status(b1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(c1_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(c2_id), QWSElementStatus::KnownAbsent);
-        assert_eq!(collapsed_world.get_element_status(d1_id), QWSElementStatus::KnownAbsent);
+        let collapsed_view = quantum_world_state.new_view(&vec![t0_id]).unwrap();
+        assert_eq!(collapsed_view.get_element_status(a1_id), QWSElementStatus::KnownPresent);
+        assert_eq!(collapsed_view.get_element_status(b1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(c1_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(c2_id), QWSElementStatus::KnownAbsent);
+        assert_eq!(collapsed_view.get_element_status(d1_id), QWSElementStatus::KnownAbsent);
 
         //Now test that we cannot collapse around multiple incompatible transactions
         //In this particular test, all transactions are exclusive to all others
-        assert!(quantum_world_state.partially_collapse(&vec![t1_id, t2_id]).is_err(), "elements should not be allowed to coexist!");
-        assert!(quantum_world_state.partially_collapse(&vec![t0_id, t3_id]).is_err(), "elements should not be allowed to coexist!");
-        assert!(quantum_world_state.partially_collapse(&vec![t3_id, t4_id]).is_err(), "elements should not be allowed to coexist!");
+        assert!(quantum_world_state.new_view(&vec![t1_id, t2_id]).is_err(), "elements should not be allowed to coexist!");
+        assert!(quantum_world_state.new_view(&vec![t0_id, t3_id]).is_err(), "elements should not be allowed to coexist!");
+        assert!(quantum_world_state.new_view(&vec![t3_id, t4_id]).is_err(), "elements should not be allowed to coexist!");
 
         //Try the same thing through the "continued collapse" call
-        let mut collapsed_world = quantum_world_state.partially_collapse(&vec![t1_id]).unwrap();
-        assert!(collapsed_world.continue_collapse(&vec![t2_id]).is_err(), "elements should not be allowed to coexist!");
-        let mut collapsed_world = quantum_world_state.partially_collapse(&vec![t0_id]).unwrap();
-        assert!(collapsed_world.continue_collapse(&vec![t3_id]).is_err(), "elements should not be allowed to coexist!");
-        let mut collapsed_world = quantum_world_state.partially_collapse(&vec![t3_id]).unwrap();
-        assert!(collapsed_world.continue_collapse(&vec![t4_id]).is_err(), "elements should not be allowed to coexist!");
+        let mut collapsed_view = quantum_world_state.new_view(&vec![t1_id]).unwrap();
+        assert!(collapsed_view.collapse_further(&vec![t2_id]).is_err(), "elements should not be allowed to coexist!");
+        let mut collapsed_view = quantum_world_state.new_view(&vec![t0_id]).unwrap();
+        assert!(collapsed_view.collapse_further(&vec![t3_id]).is_err(), "elements should not be allowed to coexist!");
+        let mut collapsed_view = quantum_world_state.new_view(&vec![t3_id]).unwrap();
+        assert!(collapsed_view.collapse_further(&vec![t4_id]).is_err(), "elements should not be allowed to coexist!");
 
         //Finally, test that we also cannot create a transaction based on conflicting entangled elements
         assert!(quantum_world_state.add_transaction(&[a1_id], &[b1_id], vec![
