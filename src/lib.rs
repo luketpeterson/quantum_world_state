@@ -142,7 +142,7 @@ pub struct QuantumWorldState {
 
     elements : QWSElementStore,         //The object that owns all elements in the QWS
     transactions : Vec<QWSTransaction>,   //The table that records all of the QWS Transactions
-    uncollapsed_view : QWSQueryMask //The mask that reflects the totally uncollapsed world.
+    uncollapsed_mask : QWSQueryMask //The mask that reflects the totally uncollapsed world.
         //NOTE: This just records every element in superposition, but it's here so we don't need to recreate
         //it every time we need it.  Right now, creating it from scratch is dirt cheap, but maybe that will
         //change in the future.
@@ -153,7 +153,7 @@ pub struct QWSPartiallyCollapsedState<'a> {
 
     quantum_world : &'a QuantumWorldState,
     collapsed_transactions : Vec<QWSTransactionID>,
-    data_view : QWSQueryMask
+    data_mask : QWSQueryMask
 }
 
 //A struct that is used to hold onto a transaction in the QuantumWorldState
@@ -162,7 +162,7 @@ pub struct QWSTransaction {
     created_elements : Vec<QWSElementID>,
     destroyed_elements : Vec<QWSElementID>,
     entangled_elements : Vec<QWSElementID>,
-    data_view : QWSQueryMask,
+    data_mask : QWSQueryMask,
 }
 
 //private: A struct that stores all elements, and is used to handle queries
@@ -272,15 +272,15 @@ struct QWSQueryMaskContents {
         // being in superposition or AbsentPast, depending on whether a future transaction is compatible with the transaction that caused the
         // element to enter this set.
 
-    dependent_elements : im::HashSet<QWSElementID>, //This set tracks the elements that must not be absent in the dependent views for this
-        // data_view to exist.  This is NOT part of the 3 status sets above, and WILL contain elements that overlap other sets.
+    dependent_elements : im::HashSet<QWSElementID>, //This set tracks the elements that must not be absent in the dependent masks for this
+        // data_mask to exist.  This is NOT part of the 3 status sets above, and WILL contain elements that overlap other sets.
         //In summary...
         //Present Set = Created + Entangled
         //Dependent Set = Created + Entangled + Deleted
 
-    consistent_to : QWSTransactionID //The ID of the last transaction this view is aware of.  Because TransactionIDs are assigned
-    //sequentially, subsequent IDs are not accurately captured in this view even though subsequent transactions may delete items
-    //from this view.  NOTE: this ID is **EXCLUSIVE** of the transaction.  In other words, if consistent_to == 0, it means this
+    consistent_to : QWSTransactionID //The ID of the last transaction this mask is aware of.  Because TransactionIDs are assigned
+    //sequentially, subsequent IDs are not accurately captured in this mask even though subsequent transactions may delete items
+    //from this mask.  NOTE: this ID is **EXCLUSIVE** of the transaction.  In other words, if consistent_to == 0, it means this
     //mask is NOT aware of TransactionID 0.  If consistent_to == 5, it means the mask is aware of transactionIDs 0 to 4.
 }
 
@@ -349,13 +349,13 @@ impl std::ops::Index<QWSElementID> for QWSElementStore {
 
 impl QWSTransaction {
 
-    fn new(destroyed_elements : &[QWSElementID], entangled_elements : &[QWSElementID], created_elements : Vec<QWSElementID>, data_view : QWSQueryMask, new_transaction_id : QWSTransactionID) -> QWSTransaction {
+    fn new(destroyed_elements : &[QWSElementID], entangled_elements : &[QWSElementID], created_elements : Vec<QWSElementID>, data_mask : QWSQueryMask, new_transaction_id : QWSTransactionID) -> QWSTransaction {
         QWSTransaction {
             id : new_transaction_id,
             created_elements : created_elements,
             destroyed_elements : destroyed_elements.to_vec(),
             entangled_elements : entangled_elements.to_vec(),
-            data_view : data_view
+            data_mask : data_mask
         }
     }
 
@@ -376,7 +376,7 @@ impl QuantumWorldState {
         QuantumWorldState{
             elements : QWSElementStore::new(),
             transactions : Vec::new(),
-            uncollapsed_view : QWSQueryMask::new(QWSTransactionID(0))
+            uncollapsed_mask : QWSQueryMask::new(QWSTransactionID(0))
         }
     }
 
@@ -415,49 +415,46 @@ impl QuantumWorldState {
             QWSElementRecord::new(element, new_transaction_id, new_element_id)
         }).collect();
         
-        //Extend the world's uncollapsed_view, so we have an entry for every element
+        //Extend the world's uncollapsed_mask, so we have an entry for every element
         //NOTE: Given the implementation of QWSQueryMask, this does nothing and may be wasteful, but probably negligible perf cost.
         //  It's in here for correctness, so that if we change the implementation of QWSQueryMask it will be kept up to date
-        self.sync_transactions_with_mask(&self.uncollapsed_view)?;
+        self.sync_transactions_with_mask(&self.uncollapsed_mask)?;
         
-        //Create the new transaction's data_view using the data_view of all of the entangled, deleted, and added elements
-        let mut new_transaction_data_view = self.uncollapsed_view.clone();
+        //Create the new transaction's data_mask using the data_mask of all of the entangled, deleted, and added elements
+        let mut new_transaction_data_mask = self.uncollapsed_mask.clone();
 
-        //Make our data_view mask aware that the created and entangled elements are present
-        new_transaction_data_view.add_present_elements(elements_to_entangle)?;
-        new_transaction_data_view.add_present_elements(&created_element_ids[..])?;
+        //Make our data_mask aware that the created and entangled elements are present
+        new_transaction_data_mask.add_present_elements(elements_to_entangle)?;
+        new_transaction_data_mask.add_present_elements(&created_element_ids[..])?;
 
-        //Make our new data_view mask aware of the created, deleted and entangled elements for dependency checking
-        new_transaction_data_view.add_dependent_elements(elements_to_entangle)?;
-        new_transaction_data_view.add_dependent_elements(elements_to_destroy)?;
-        new_transaction_data_view.add_dependent_elements(&created_element_ids[..])?;
+        //Make our new data_mask aware of the created, deleted and entangled elements for dependency checking
+        new_transaction_data_mask.add_dependent_elements(elements_to_entangle)?;
+        new_transaction_data_mask.add_dependent_elements(elements_to_destroy)?;
+        new_transaction_data_mask.add_dependent_elements(&created_element_ids[..])?;
 
-        //Go over all entangled elements and merge their data_views, in order to create the data_view for our new transaction
+        //Go over all entangled elements and merge their data_masks, in order to create the data_mask for our new transaction
         //NOTE: Deleting an element is a form of entangling with it, so we do this identically for deleted and entangled elements
         let all_entangled_elements_iter = elements_to_destroy.iter().chain(elements_to_entangle.iter());
         for entangled_element_id in all_entangled_elements_iter {
             let element_record = &self.elements[*entangled_element_id];
             let transaction_record = &self.transactions[element_record.created_by.0];
 
-            //Bring the view up to date of the transaction that created the element we're entangling.
-            //NOTE: The transaction we are in the process of creating already exists in the transactions list at this point,
-            //  so this function will sync the dependent transactions with it.  However it doesn't have a complete data_view yet.
-            //  This is probably ok, because we don't rely on the data_view to sync, but if that changes we'll be in trouble.
-            self.sync_transactions_with_mask(&transaction_record.data_view)?;
+            //Bring the mask up to date of the transaction that created the element we're entangling.
+            self.sync_transactions_with_mask(&transaction_record.data_mask)?;
 
-            //Merge the view of the element we're entangling with, using the "dependency merge" behavior
-            new_transaction_data_view.merge_for_base(&transaction_record.data_view, &self.transactions[..])?;
+            //Merge the mask of the element we're entangling with, using the "dependency merge" behavior
+            new_transaction_data_mask.merge_for_base(&transaction_record.data_mask, &self.transactions[..])?;
         }
-        QWSQueryMask::add_settled_absent_elements(new_transaction_data_view.contents.get_mut(), elements_to_destroy)?;
+        QWSQueryMask::add_settled_absent_elements(new_transaction_data_mask.contents.get_mut(), elements_to_destroy)?;
 
-        //We don't want this data_view to attempt to sync with itself later on
-        new_transaction_data_view.set_consistent_to(new_transaction_id + QWSTransactionID::from(1));
+        //We don't want this data_mask to attempt to sync with itself later on
+        new_transaction_data_mask.set_consistent_to(new_transaction_id + QWSTransactionID::from(1));
 
         //Push our elements onto the QWS elements vec, now that we're sure the transaction is going to be created sucessfully
         self.elements.add_elements(element_records);
         
         //Create our new transaction record and Push it into the world's table
-        let new_transaction_record = QWSTransaction::new(elements_to_destroy, elements_to_entangle, created_element_ids, new_transaction_data_view, new_transaction_id);
+        let new_transaction_record = QWSTransaction::new(elements_to_destroy, elements_to_entangle, created_element_ids, new_transaction_data_mask, new_transaction_id);
         self.transactions.push(new_transaction_record);
 
         //Get our transaction record out of the table, so we can return it
@@ -474,7 +471,7 @@ impl QuantumWorldState {
     }
 
     //An internal function to propagate transactions backwards, bringing the mask to to date with all transaction in the QuantumWorld
-    //This is necessary because future transactions may destroy existing elements, thus entangling the elements in the view with 
+    //This is necessary because future transactions may destroy existing elements, thus entangling the elements in the mask with 
     //  elements created by future transactions
     //
     //BackPropagating Rules:
@@ -494,10 +491,6 @@ impl QuantumWorldState {
         while transaction_id < QWSTransactionID::from(self.transactions.len()) {
 
             let transaction = self.get_transaction(transaction_id).unwrap();
-
-            //IMPORTANT: Because of where this function is called from, we can't rely on the transaction 
-            //  we're syncing with to have a valid data_view at the time this is called.  The data_view for
-            //  the transaction might be an empty data_view with all elements in Superposition.
 
             //RULE 1.) If a future transaction attempts to delete a P element, An Af entry is created for each element the transaction
             // creates. In this situation, the Af entry references the future transaction that's being back-propagated.
@@ -539,12 +532,12 @@ impl <'a>QWSPartiallyCollapsedState<'a> {
 
     pub fn new(quantum_world : &'a QuantumWorldState, target_transactions : &[QWSTransactionID]) -> Result<QWSPartiallyCollapsedState<'a>, QWSError> {
 
-        //Create our new partially collapsed view
-        //Start with a data_view for every element in superposition, that represents the QuantumWorldState in totality
+        //Create our new partially collapsed mask
+        //Start with a data_mask for every element in superposition, that represents the QuantumWorldState in totality
         let mut new_partially_collapsed_state = QWSPartiallyCollapsedState {
             quantum_world : quantum_world,
             collapsed_transactions : target_transactions.to_vec(),
-            data_view : quantum_world.uncollapsed_view.clone()
+            data_mask : quantum_world.uncollapsed_mask.clone()
         };
 
         //And then collapse it around the transactions provided
@@ -555,16 +548,16 @@ impl <'a>QWSPartiallyCollapsedState<'a> {
 
     pub fn continue_collapse(&mut self, target_transactions : &[QWSTransactionID]) -> Result<(), QWSError> {
 
-        //Loop over the elements, and further collapse the data_view around each one
+        //Loop over the elements, and further collapse the data_mask around each one
         for transaction_id in target_transactions.into_iter() {
 
             let transaction_record = &self.quantum_world.transactions[transaction_id.0];
 
-            //Bring each of the transaction_record's views up to date.
-            self.quantum_world.sync_transactions_with_mask(&transaction_record.data_view)?;
+            //Bring each of the transaction_record's masks up to date.
+            self.quantum_world.sync_transactions_with_mask(&transaction_record.data_mask)?;
 
-            //Merge all of the views together
-            self.data_view.merge_for_collapse(&transaction_record.data_view)?
+            //Merge all of the masks together
+            self.data_mask.merge_for_collapse(&transaction_record.data_mask)?
         }
 
         Ok(())
@@ -572,7 +565,7 @@ impl <'a>QWSPartiallyCollapsedState<'a> {
 
     pub fn get_element_status(&self, element_id : QWSElementID) -> QWSElementStatus {
         if element_id < self.quantum_world.elements.next_new_element_id() { // If the element_id is outside the range tracked by the elements table, the mask won't have a meaningful entry for it either, but we don't want to assume it's in superposition - although, in a sense, it is.
-            let internal_status = self.data_view.get_element_internal_status(element_id);
+            let internal_status = self.data_mask.get_element_internal_status(element_id);
             match internal_status {
                 QWSInternalElementStatus::AbsentFuture => QWSElementStatus::KnownAbsent,
                 QWSInternalElementStatus::Present => QWSElementStatus::KnownPresent,
@@ -590,7 +583,7 @@ impl <'a>QWSPartiallyCollapsedState<'a> {
 
     pub fn query_by_type(&self, element_type : QWSElementType) -> Vec<QWSElementID> {
 
-        vec![QWSElementID::from(0)]  //BORIS Yeltsin, query self.data_view
+        vec![QWSElementID::from(0)]  //BORIS Yeltsin, query self.data_mask
     }
 }
 
@@ -614,7 +607,7 @@ impl QWSQueryMask {
         self_contents.consistent_to = consistent_to;
     }
 
-    //This function merges the elements in other_view into self.  Used to create the data_view for a new transaction
+    //This function merges the elements in other_mask into self.  Used to create the data_mask for a new transaction
     //This function is at the heart of creating new transactions, so my fear is that it might be too slow.
     //  If this is too slow in the future, we may need to revisit this implementation and possibly this whole design...
     //
@@ -624,13 +617,13 @@ impl QWSQueryMask {
     //3. Evaluate each absentFuture entry we're merging in, examining each transaction, and if that transaction conflicts
     //      with the mask we're merging, then degenerate the AbsentFuture entry to an absentPast entry, and if not,
     //      ignore the element, effectively makeing it Superposition.
-    //4. There is nothing to do for our AbsentFuture or Present entries.  A freshly created transaction data_view has no
+    //4. There is nothing to do for our AbsentFuture or Present entries.  A freshly created transaction data_mask has no
     //      Present entries except what it created or entangled itself and no AbsentFuture entries whatsoever, because
     //      by definition, AbsentFuture entries occur when a future transaction references the elements Present here.
-    fn merge_for_base(&mut self, other_view : &QWSQueryMask, transactions : &[QWSTransaction]) -> Result<(), QWSError> {
+    fn merge_for_base(&mut self, other_mask : &QWSQueryMask, transactions : &[QWSTransaction]) -> Result<(), QWSError> {
 
         let self_contents = self.contents.get_mut();
-        let other_contents = &(*other_view.contents.borrow());
+        let other_contents = &(*other_mask.contents.borrow());
 
         //RULE 1.) Make sure there are no conflicts between Dependent and AbsentPast elements
         let mut conflicting_element_id = QWSElementID::default();
@@ -645,7 +638,7 @@ impl QWSQueryMask {
         swap(&mut self_contents.settled_absent_elements, &mut temp_set);
         self_contents.settled_absent_elements = temp_set.union(other_contents.settled_absent_elements.clone());
 
-        //RULE 3.) Evaluate the AbsentFuture elements in the other_view to see whether we should promote it to a settled_absent element
+        //RULE 3.) Evaluate the AbsentFuture elements in the other_mask to see whether we should promote it to a settled_absent element
         let mut conflict_cache : std::collections::HashMap<QWSTransactionID, bool> = std::collections::HashMap::with_capacity(8); //A temporary cache so we don't end up checking the same transactions multiple times
         for (&future_absent_element, transaction_id_vec) in other_contents.future_absent_elements.iter() {
 
@@ -660,7 +653,7 @@ impl QWSQueryMask {
                 } else {
                     let referenced_transaction = &transactions[transaction_id.0]; //If we have an invalid TransactionID, it's an internal bug and panicking is the right thing to do
 
-                    if QWSQueryMask::check_for_conflicts(self_contents, &(*referenced_transaction.data_view.contents.borrow()), None) {
+                    if QWSQueryMask::check_for_conflicts(self_contents, &(*referenced_transaction.data_mask.contents.borrow()), None) {
                         should_flag_as_settled_absent = true;
                         conflict_cache.insert(*transaction_id, true);
                         break;
@@ -680,22 +673,22 @@ impl QWSQueryMask {
         Ok(())
     }
 
-    //This function merges the elements in other_view into self.  Used to create the data_view for a collapsed world state
+    //This function merges the elements in other_mask into self.  Used to create the data_mask for a collapsed world state
     //This function is at the heart of collapsing the QWS, so my fear is that it might be too slow.
     //  If this is too slow in the future, we may need to revisit this implementation and possibly this whole design...
     //
     //"Collapsing Behavior" Rules:
     //1. Promote every entry in the AbsentFuture set to the AbsentPast set.  (In this case, the description of "settled" is
     //      more appropriate than the description of "past")  Since the end result will be a merged mask, we'll actually
-    //      promote AbsentFuture entries in other_view into AbsentPast entries in self.  It shouldn't actually matter, and
+    //      promote AbsentFuture entries in other_mask into AbsentPast entries in self.  It shouldn't actually matter, and
     //      we have mutable access to self.
     //2. Make sure neither mask's Dependent set conflicts with the other mask's AbsentPast set, if they do then it's an error
     //3. union the two AbsentPast sets
     //4. union the two Present sets
-    fn merge_for_collapse(&mut self, other_view : &QWSQueryMask) -> Result<(), QWSError> {
+    fn merge_for_collapse(&mut self, other_mask : &QWSQueryMask) -> Result<(), QWSError> {
 
         let self_contents = self.contents.get_mut();
-        let other_contents = &(*other_view.contents.borrow());
+        let other_contents = &(*other_mask.contents.borrow());
 
         //RULE 1.) Promote AbsentFuture entries to settled_absent elements
         for (&future_absent_element, _transaction_id_vec) in other_contents.future_absent_elements.iter() {            
@@ -747,7 +740,7 @@ impl QWSQueryMask {
         false
     }
 
-    //Sets all of the elements specified in the slice to be "KnownPresent" in the dataview
+    //Sets all of the elements specified in the slice to be "KnownPresent" in the datamask
     fn add_present_elements(&mut self, elements : &[QWSElementID]) -> Result<(), QWSError> {
 
         let self_contents = self.contents.get_mut();
@@ -762,7 +755,7 @@ impl QWSQueryMask {
         Ok(())
     }
 
-    //Adds all of the elements specified in the slice to the data_view's dependency set
+    //Adds all of the elements specified in the slice to the data_mask's dependency set
     fn add_dependent_elements(&mut self, elements : &[QWSElementID]) -> Result<(), QWSError> {
 
         let self_contents = self.contents.get_mut();
