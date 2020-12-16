@@ -37,15 +37,15 @@ extern crate derive_more;
 
 
 
-// BORIS 4 things left to do, and we're done.
-// 1. Add API to get transactions holding a world state in superposition
+// BORIS 3! things left to do, and we're done.
+// 1. Add API to get transactions holding a world state in superposition.
+//      This should likely take the form of a iterator to iterate over all uncollapsed transactions relevant to a given view
+//      We might also want to add parameters to the element_iterator creation that allow iteration over all absent elements, all present elements, and all superposition elements
 // 2. Add test for that API
-// 3. Add query functionality that works
-//      Add an iterator object to iterate over query resutls.  The iterator object borrows the partially collapsed world state
+// 3. √√√Add query functionality that works
+//      √√Add an iterator object to iterate over query resutls.  The iterator object borrows the partially collapsed world state
 // 4. Format Comments with RustDoc
 //
-//NEW PLAN.  The partially collapsed state should be renamed to "view"  There should be a function to get a results iterator, submit a query to cut back results, etc.
-//Before renaming it, I should change the current "data_view" variables and members to "mask".
 
 
 
@@ -116,8 +116,9 @@ pub enum QWSElementStatus {
 //A type of element in the QuantumWorldState.
 //Eventiually we'll make this something more flexible than an Enum, but an Enum is fine to get up and running
 //The internals of the QWS data structure don't care about what an element is at all.
-#[derive(Copy, Debug, Clone)]
+#[derive(Copy, Debug, Clone, Hash, Eq, PartialEq)]
 pub enum QWSElementType {
+    Unspecified,
     GenericText,
     DocumentHeight,
     DocumentWidth,
@@ -156,10 +157,15 @@ pub struct QuantumWorldState {
 //  the results found by the query.  Therefore, the QWSDataView is the single object responsible for holding
 //  both query results and partially collapsed state.
 pub struct QWSDataView<'a> {
-
     quantum_world : &'a QuantumWorldState,
     collapsed_transactions : Vec<QWSTransactionID>,
-    data_mask : QWSQueryMask
+    data_mask : QWSQueryMask,
+    query : Option<QWSQueryInternals>
+}
+
+pub struct QWSElementsIterator<'a, 'b> {
+    data_view : &'b QWSDataView<'a>,
+    elements_iter : Box<dyn Iterator<Item=QWSElementID>+'a>
 }
 
 //A struct that is used to hold onto a transaction in the QuantumWorldState
@@ -174,12 +180,21 @@ pub struct QWSTransaction {
 //private: A struct that stores all elements, and is used to handle queries
 struct QWSElementStore {
     table : Vec<QWSElementRecord>,   //The table that holds ownership of all of the elements in the QWS
+    types_index : std::collections::HashMap<QWSElementType, Vec<QWSElementID>>, //A table that maps each elementType to all of the
+        //individual elements that have that type
 }
 
 //private: A struct that is used internally to hold onto the elements in the QuantumWorldState
 struct QWSElementRecord {
     element : Box<dyn QWSElement>, //The data represented by this element
     created_by : QWSTransactionID, //The transaction that created this QWSElement
+}
+
+//private: A struct to represent whatever fields are associated with a query as well as the internal data to allow iteration
+//  through the query results.
+//Since the only type of query we support is a simple "element_type matches a single value", this structure is more of a placeholder
+struct QWSQueryInternals {
+    query_by_type : QWSElementType
 }
 
 //private: The internal status code associated with each element in each QWSQueryMask
@@ -327,6 +342,7 @@ impl QWSElementStore {
     fn new() -> QWSElementStore {
         QWSElementStore{
             table : Vec::new(),
+            types_index : std::collections::HashMap::new()
         }
     }
 
@@ -341,7 +357,37 @@ impl QWSElementStore {
     //Adds elements to the QWSElementStore in the order they are provided in the new_element_records vec, with the first element being
     //  assigned the ID of next_new_element_id, and incrementing by 1 for each additional element
     fn add_elements(&mut self, new_element_records : Vec<QWSElementRecord>) {
+
+        //Go over each new element record
+        let element_id_base = self.next_new_element_id();
+        for (index, element_record) in new_element_records.iter().enumerate() {
+            let new_element_id = element_id_base + QWSElementID::from(index);
+
+            //Add it to the index for querying by type
+            match self.types_index.get_mut(&element_record.element.element_type()) {
+                Some(type_vec) => { type_vec.push(new_element_id); },
+                None => { self.types_index.insert(element_record.element.element_type(), vec![new_element_id]); },
+            }
+        }
+
+        //Add the element records to the table
         self.table.extend(new_element_records);
+    }
+
+    //Get an iterator to go over the ID of every element in the QWSElementStore
+    fn iter_for_all_elements<'a>(&'a self) -> Box<dyn Iterator<Item=QWSElementID>+'a> {
+        Box::new(self.table.iter().enumerate().map(|(index, _record)| QWSElementID::from(index)))
+    }
+    
+    //Get an iterator to go over the IDs for every element of a specified type
+    //NOTE: in the future, this is a pattern for how to extend to a general query
+    fn iter_for_elements_of_type<'a>(&'a self, element_type : QWSElementType) -> Box<dyn Iterator<Item=QWSElementID>+'a> {
+        let created_iter = match self.types_index.get(&element_type) {
+            Some(type_vec) => type_vec.iter().cloned(),
+            None => [].iter().cloned() //The slice operator is an exception to the general inability to return an empty iterator without it being boxed.  Nice :-)
+        };
+
+        Box::new(created_iter)
     }
 }
 
@@ -541,7 +587,8 @@ impl <'a>QWSDataView<'a> {
         let new_data_view = QWSDataView {
             quantum_world : quantum_world,
             collapsed_transactions : vec![],
-            data_mask : quantum_world.uncollapsed_mask.clone()
+            data_mask : quantum_world.uncollapsed_mask.clone(),
+            query : None
         };
 
         new_data_view
@@ -588,9 +635,52 @@ impl <'a>QWSDataView<'a> {
         &self.collapsed_transactions[..]
     }
 
-    pub fn query_by_type(&self, element_type : QWSElementType) -> Vec<QWSElementID> {
+    //Narrows the elements in the view to contain only elements whose type matches the element_type parameter
+    pub fn query_by_type(mut self, element_type : QWSElementType) -> Result<Self, QWSError> {
 
-        vec![QWSElementID::from(0)]  //BORIS Yeltsin, query self.data_mask
+        if self.query.is_none() {
+            self.query = Some(QWSQueryInternals{query_by_type : element_type});
+            Ok(self)
+        } else {
+            Err(QWSError::MiscErr(format!("UNSUPPORTED: Attempt to specify multiple queries.  Currently only a single element type may be queried.")))
+        }
+    }
+
+    pub fn elements_iter(&self) -> QWSElementsIterator {
+
+        //If we have a query, we want to iteate over the results of that query
+        let elements_iter = if let Some(query) = &self.query {
+            self.quantum_world.elements.iter_for_elements_of_type(query.query_by_type)
+        } else {
+            //If we don't have a query, we want to iterate over every element
+            self.quantum_world.elements.iter_for_all_elements()
+        };
+
+        QWSElementsIterator{
+            data_view : self,
+            elements_iter : elements_iter
+        }
+    }
+}
+
+impl Iterator for QWSElementsIterator<'_, '_> {
+    type Item = QWSElementID;
+    
+    fn next(&mut self) -> Option<QWSElementID> {
+
+        //We will filter the output from the query results iterator based on the data_view's mask
+        while let Some(candidate_element_id) = self.elements_iter.next() {
+
+            match self.data_view.get_element_status(candidate_element_id) {
+                QWSElementStatus::KnownPresent => return Some(candidate_element_id),
+                QWSElementStatus::Superposition => return Some(candidate_element_id),
+                QWSElementStatus::KnownAbsent => (),
+                QWSElementStatus::Unknown => ()
+            }
+        }
+
+        //If we get here, we're out of query results
+        None
     }
 }
 
@@ -955,14 +1045,17 @@ mod tests {
         //  at the same time because they can't coexist in the same epoch
         assert!(quantum_world_state.new_view().collapse(&vec![zero_trans_id, one_trans_id]).is_err(), "elements should not be allowed to coexist!");
 
-        //Add a third element, "Two", that destroys element "One", and confirm that when we query the collapsed state we only get the one result
+        //Add a third element, "Two", that destroys element "One"
         let transaction = quantum_world_state.add_transaction(&vec![one_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "Two"))]).unwrap();
         let &two_id = transaction.created_elements().first().unwrap();
         let two_trans_id = transaction.id();
+
+        //Confirm that when we query the collapsed state we only get the one result
         let collapsed_view = quantum_world_state.new_view().collapse(&vec![two_trans_id]).unwrap();
-        let results = collapsed_view.query_by_type(QWSElementType::GenericText);
-        assert_eq!(results.len(), 1);
-        //assert_eq!(two_id, results[0]); BORIS, Querying needs to actually work for this to succeed.
+        let queried_view = collapsed_view.query_by_type(QWSElementType::GenericText).unwrap();
+        let found_elements : Vec<QWSElementID> = queried_view.elements_iter().collect();
+        assert_eq!(found_elements.len(), 1);
+        assert_eq!(two_id, found_elements[0]);
     }
 
     #[test]
@@ -1211,7 +1304,7 @@ mod tests {
 //  time.  To implement a unary operation, just loop over your query results from a query against a superposition world.
 //
 //Binary operatons require a partially collapsed world.  A binary operation performs a determination and takes action depending on two
-//  elements relative to another.  So to implement a binary operation, you would start with one of the elements, collapse the world
+//  elements relative to each other.  So to implement a binary operation, you would start with one of the elements, collapse the world
 //  around that element, run the query on that partially collapsed world, and then loop over those results and compare them to the
 //  original element.
 //
