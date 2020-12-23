@@ -41,10 +41,14 @@ extern crate derive_more;
 // 1. Add API to get transactions holding a world state in superposition.
 //      This should likely take the form of a iterator to iterate over all uncollapsed transactions relevant to a given view
 //      We might also want to add parameters to the element_iterator creation that allow iteration over all absent elements, all present elements, and all superposition elements
+//      Remember to invalidate the collapse plan if either the view collapses further or the query changes
 // 2. Add test for that API
 // 3. √√√Add query functionality that works
 //      √√Add an iterator object to iterate over query resutls.  The iterator object borrows the partially collapsed world state
-// 4. Format Comments with RustDoc
+// 4. Internally store a view's "collapsed_transactions" and "conflicting_transactions" as a HashSet, rather than a vec, which means I'll need
+//      to create a TransactionIterator rather than returning a slice
+// 5. Make some errors "silent", i.e. don't bother allocating an error string, if we're expecting the possibility of an error and intend to handle it
+// 6. Format Comments with RustDoc
 //
 
 
@@ -160,7 +164,19 @@ pub struct QWSDataView<'a> {
     quantum_world : &'a QuantumWorldState,
     collapsed_transactions : Vec<QWSTransactionID>,
     data_mask : QWSQueryMask,
-    query : Option<QWSQueryInternals>
+    query : Option<QWSQueryInternals>,
+    full_collapse_plan : Option<QWSFullCollapsePlan>,
+}
+
+//private: A structure that contains members needed to fully collapse the view, but also to iterate over the
+//  conflicting transactions that would prevent it from fully collapsing.  Building the conflicting_transactions
+//  list is a side effect of attempting to perform a full collapse, and vice-versa.  So we don't want to throw
+//  away this work, if we build it during one call
+struct QWSFullCollapsePlan {
+    // already_fully_collapsed : bool, BORIS DEAD
+    // fully_collapsed_mask : QWSQueryMask,
+    freely_collapsible_transactions : Vec<QWSTransactionID>,
+    conflicting_transactions : Vec<QWSTransactionID>,
 }
 
 pub struct QWSElementsIterator<'a, 'b> {
@@ -188,6 +204,43 @@ struct QWSElementStore {
 struct QWSElementRecord {
     element : Box<dyn QWSElement>, //The data represented by this element
     created_by : QWSTransactionID, //The transaction that created this QWSElement
+//BEGIN BORIS
+    //    deleted_by : SmallVec::<[QWSTransactionID; 1]>, //A vector recording every transaction that has a direct conflict with the
+    // element.  i.e. if the given element exists, then it would be problematic to collapse any of the referenced transactions.
+    // This list does not track indirect conflicts, i.e. conflicts because of sucessive entanglements.
+    // Every time a new transaction is added, every element that is deleted by the transaction needs to have its record updated.
+
+//BORIS
+//Table is updated when a new transaction is sucessfully added.
+//If a transaction deletes an element, it records that new transaction ID into that element's
+
+//Fully collapsing is easy... THere might be a shortcut, but in essence, we just iterate over every query result, and collapse its
+//creator.  If we make it to the end of the results without blowing up, we are fully collapsed.
+
+//Iterating over the conflicts is where I'm stuck...  We start with an element from the query result, look up its deleted_by transactions,
+// and somehow we need to figure out if each deleted_by transaction is something we need to care about.....
+//
+//I think we're probably going to need to get the query's result elements in a random-access structure (e.g. a HashMap)
+//One way to answer that question about whether a transaction is relevant is to see if... 
+
+//BBKing Yeltsin Boris
+
+//FUCK I think I'm overthinking this...  Maybe the right solution is to just make an internally mutable fully collapsed map that is
+//associated with every view and is initially invalid.  Then a call to either fully collapse or to begin conflict iteration generates
+//map.
+//
+//To generate the map, we just go over the query results in order, and collapse each element's creator transaction into a new fully
+//collapsed mask.  If we make it to the end we have a fully collapsed mask that can replace our view's mask.  If we hit an error than
+//it means we've found a conflict between the transaction that triggered the error and (BORIS????), and both transactions need to be
+//put into a conflicting transactions list for subsequent iteration.
+
+//GOT IT!!!!  We just need a simple hashset inside the mask, to track transactions that the mask conflicts with.  It's a corroloary to
+//for the AbsentPast set.  every time an element enters the absent past set, the transaction that put it there enters the conflicting
+//transaction set.
+
+//Collapsing a view or setting the query invalidates the map.
+
+//END BORIS
 }
 
 //private: A struct to represent whatever fields are associated with a query as well as the internal data to allow iteration
@@ -273,7 +326,7 @@ struct QWSQueryMask {
 #[derive(Debug, Clone)]
 struct QWSQueryMaskContents {
 
-    //All elements should be in at most one of the sets below.  If an element is in multiple sets, it is an implementation bug.
+    //All elements should be in at most one of the 3 sets below.  If an element is in multiple sets, it is an implementation bug.
     //If an element is in none of the sets its status is Superposition.
     //So...
     //Present = present_elements
@@ -298,6 +351,62 @@ struct QWSQueryMaskContents {
         //In summary...
         //Present Set = Created + Entangled
         //Dependent Set = Created + Entangled + Deleted
+
+    conflicting_transactions : im::HashSet<QWSTransactionID>, //This set tracks the transactions that could never be collapsed along side
+        // this mask.  You can think of this as the set of transactions that contributed elements to the "settled_absent_elements" set.
+
+    future_conflicting_transactions : im::HashSet<QWSTransactionID>, //This set also tracks transactions that could not be collapsed
+        // along side this mask, but unlike conflicting_transactions, the conflict isn't always permanantly passed onto other descending
+        // transactions.  This is associated with "future_absent_elements", and because future_absent_elements already tracks the
+        // responsible transactions, this future_conflicting_transactions map can be entirely built from the future_absent_elements map.
+        // In fact, you can think of this as a reverse lookup table to quickly determine if a transaction is in future_absent_elements.
+        
+    //BEGIN BORIS.  NOT SURE WHICH, if either or both, of these we should include
+//    conflicting_superposition_elements : im::HashMap<QWSElementID, SmallVec::<[QWSTransactionID; 1]>>, //This set tracks the
+        // elements that were created by transactions that, if collapsed would conflict with other transactions, and therefore,
+        // if an attempt were made to fully_collapse() the mask, those elements would cause a conflict.  The Transactions
+        // that are referred to are the transactions that conflict with a given element, either by deleting it or BORIS
+
+//BORIS
+//    non_conflicting_transactions : im::HashSet<QWSTransactionID>, //This set tracks all transactions that could be freely collapsed
+        // into this mask without causing a conflict.  Transactions in this list are responsible for creating elements that are in
+        // superposition because they aren't explicitly entangled or created at the specified epoch, but are unconflicted
+        // nonetheless.  This set should include every transaction that is not referenced by an entry in the
+        // conflicting_superposition_elements table.
+
+//    fully_collapsed_present_elements : im::HashSet<QWSElementID>,
+//BORIS, rather than saving transactions here, we might be better off saving a set of elements, "fully_collapsed_present_elements",
+//which would save all the conflict-free elements in the mask.  Then we have an easy time providing a fully collapsed mask, no
+//need to iterate transactions.  When we're back-propagating, we look for each entangled element in here, and if an entanglement
+//causes an element to move into the conflicted state, then we remove it from this list and add it to the
+//conflicting_superposition_elements.
+//When we're merging for forward propagation, ... BORIS.
+
+
+//THIS WHOLE IDEA of trying to track known conflicts IS FUCKED!!!!!!!  Tracking known non-conflicts (fully collapsed) is ok
+// because, somewhere in a transaction's direct past, an element was created and not destroyed
+// tracking known conflicts on the other hand means that every mask is aware of the goings-ons of every single other mask
+// (in theory).  This will have n^2 scaling properties.
+//
+//Ideally, if two sets of transactions are totally disconnected from each other, the masks pertaining to one set shouldn't
+//bloat with knowledge of which elements are conflicted in the other side of the world...
+//MAYBE I JUST LIVE WITH IT!!!!!!
+
+//LATEST REALIZATION:::::  The use case isn't to fully collapse a mask in the abstract, it's to fully collapse a query.
+//In a way that makes the implementation a bit easier - we iterate over the elements found by the query.
+//
+//Buuuuuuuuuut........... We still need to be able to figure out whether a given transaction is in a conflicted state with
+//another transaction.  That's a little bit tricky because a transaction can collapse sucessfully, but foreclose collapse of
+//another transaction later on.
+//
+//Tools at our disposal:  We could track at the mask level all of the elements that are touched (i.e. created in the past) but
+//remain unconflicted.  Not sure this helps but we can do it.
+//
+//One option is to create a master conflict list at the world level.  i.e. not part of the mask, but keeping a map from every
+//element to every transaction that entangles it.
+//THIS IS DEFINITELY PART OF THE SOLITION
+//
+//END BORIS
 
     consistent_to : QWSTransactionID //The ID of the last transaction this mask is aware of.  Because TransactionIDs are assigned
     //sequentially, subsequent IDs are not accurately captured in this mask even though subsequent transactions may delete items
@@ -498,6 +607,10 @@ impl QuantumWorldState {
             new_transaction_data_mask.merge_for_base(&transaction_record.data_mask, &self.transactions[..])?;
         }
         QWSQueryMask::add_settled_absent_elements(new_transaction_data_mask.contents.get_mut(), elements_to_destroy)?;
+        for &element_id in elements_to_destroy {
+            let conflicting_transaction = self.elements[element_id].created_by;
+            QWSQueryMask::add_conflicting_transaction(new_transaction_data_mask.contents.get_mut(), conflicting_transaction)?;
+        }
 
         //We don't want this data_mask to attempt to sync with itself later on
         new_transaction_data_mask.set_consistent_to(new_transaction_id + QWSTransactionID::from(1));
@@ -528,10 +641,25 @@ impl QuantumWorldState {
     //1.) If a future transaction attempts to delete a P element, An Af entry is created for each element the transaction creates.
     //      In this situation, the Af entry references the future transaction that's being back-propagated.
     //2.) If a future transaction attempts to entangle or delete an Ap element, An Ap entry is created for each element the transaction
-    //      creates. (Ap entries don't reference transactions)
+    //      creates. A conflicting_transactions entry is created for the transaction that's being back-propagated.
     //3.) If a future transaction attempts to entangle or delete an Af element, An Af entry is created for each element the transaction
     //      creates.  In this situation, the Af entry references the union set of transactions from all Af entries that the transaction
     //      entangles with (deletion is a form of entanglement)
+
+
+
+    //BEGIN BORIS, WHAT DO WE DO ABOUT conflicting_superposition_elements and non_conflicting_transactions ???????????????????????
+    //There are two kinds of elements that exist in superposition.  Those in superposition because its unknown
+    //  whether the transaction that creates or deletes them has been included - those cause conflicts, and those in superposition because
+    //  they weren't expressly entangled or created in a given transaction, but they're still not guarenteed because that may change in
+    //  future.  Those don't cause conflicts.
+    //If a transaction deletes an element, check the element's creator transaction.  If the creator transaction is in the non_conflicting_transactions
+    //  list, then remove it.  For the deleted element, add an entry for the transaction doing the deletion.  By default, the transaction creating an
+    //  element that has an entry in the conflicting_superposition_elements map is a conflicting transaction.
+    //QUESTION IS... Do I need to further propagate the information?  In other words, do I care about second-order conflicts??????
+    //Maybe I don't need to because If I collapse a base transaction, all future conflicting transactions become AbsentPast.
+    //4.)
+    //END BORIS
     fn sync_transactions_with_mask(&self, mask : &QWSQueryMask) -> Result<(), QWSError> {
 
         let mask_contents = &mut(*mask.contents.borrow_mut());
@@ -557,6 +685,7 @@ impl QuantumWorldState {
                 // the transaction creates. (Ap entries don't reference transactions)
                 if mask_contents.settled_absent_elements.contains(entangled_element_id) {
                     QWSQueryMask::add_settled_absent_elements(mask_contents, &transaction.created_elements[..])?;
+                    QWSQueryMask::add_conflicting_transaction(mask_contents, transaction_id)?;
                 }
 
                 //RULE 3.) If a future transaction attempts to entangle or delete an Af element, An Af entry is created for each element
@@ -588,7 +717,8 @@ impl <'a>QWSDataView<'a> {
             quantum_world : quantum_world,
             collapsed_transactions : vec![],
             data_mask : quantum_world.uncollapsed_mask.clone(),
-            query : None
+            query : None,
+            full_collapse_plan : None
         };
 
         new_data_view
@@ -614,6 +744,17 @@ impl <'a>QWSDataView<'a> {
         //Add the transactions to the collapsed_transactions list
         self.collapsed_transactions.extend(collapse_transactions);
 
+        //Void the full collapse plan
+        self.full_collapse_plan = None;
+
+        Ok(self)
+    }
+
+    pub fn fully_collapse(mut self) -> Result<Self, QWSError> {
+
+        //BORIS, somehow we need to loop over the elements in superposition or the transactions that got them there
+        //BORIS!!!
+
         Ok(self)
     }
 
@@ -635,9 +776,30 @@ impl <'a>QWSDataView<'a> {
         &self.collapsed_transactions[..]
     }
 
+    //NOTE: Conceptually, this shouldn't be a mutating API, but we need a mutable reference to self, because we do the work
+    //  to compile the conflicting transactions lazily and we want to store the results inside the object, which will speed up
+    //  subsequent calls as well as fully_collapse(), since the two are related.
+    //An alternative is to store the lazily evaluated parts inside a RefCell, but that would mean we couldn't pass back a naked slice,
+    //  and instead would need to return a "QWSTransactionIterator" object to encapsulate the Ref, from borrowing the RefCell contents
+    //A third alternative would be to force the caller to make a call to build the list, e.g. "build_conflicting_transactions_list",
+    //  but that feels incredibly ugly.
+    pub fn get_conflicting_transactions(&mut self) -> &[QWSTransactionID] {
+
+        self.build_full_collapse_plan(); //If a plan already exists, this will just return without any cost
+
+        match &self.full_collapse_plan {
+            Some(the_plan) => &the_plan.conflicting_transactions,
+            None => unreachable!(), //We just built the full_collapse_plan, it won't be None
+        }
+    }
+
     //Narrows the elements in the view to contain only elements whose type matches the element_type parameter
     pub fn query_by_type(mut self, element_type : QWSElementType) -> Result<Self, QWSError> {
 
+        //Void the full collapse plan
+        self.full_collapse_plan = None;
+
+        //Set the query internals object
         if self.query.is_none() {
             self.query = Some(QWSQueryInternals{query_by_type : element_type});
             Ok(self)
@@ -648,17 +810,147 @@ impl <'a>QWSDataView<'a> {
 
     pub fn elements_iter(&self) -> QWSElementsIterator {
 
-        //If we have a query, we want to iteate over the results of that query
-        let elements_iter = if let Some(query) = &self.query {
-            self.quantum_world.elements.iter_for_elements_of_type(query.query_by_type)
-        } else {
-            //If we don't have a query, we want to iterate over every element
-            self.quantum_world.elements.iter_for_all_elements()
-        };
+        let elements_iter = self.query_result_elements_iter();
 
         QWSElementsIterator{
             data_view : self,
             elements_iter : elements_iter
+        }
+    }
+
+    fn query_result_elements_iter(&self) -> Box<dyn Iterator<Item=QWSElementID>+'a> {
+        //If we have a query, we want to iteate over the results of that query
+        if let Some(query) = &self.query {
+            self.quantum_world.elements.iter_for_elements_of_type(query.query_by_type)
+        } else {
+            //If we don't have a query, we want to iterate over every element
+            self.quantum_world.elements.iter_for_all_elements()
+        }
+    }
+
+    //Internal function to determine if a full collapse is possible, and create the view if it is
+    fn build_full_collapse_plan(&mut self) {
+        if self.full_collapse_plan.is_none() {
+
+            //BORIS, REALIZATION(s)!!  We don't need to attempt to collapse conflicting transactions in order to know if they'll hit a snag
+            //  We are actually fine to just look at the conflicting transaction list, THIS means we don't actually need to make the data_view part of the collapse plan!!
+            //buuuuuuut, I also realized we need to consider conflicts in AbsentFuture entries as well as straight-up conflicts...  Which probably means we'd do well to
+            //maintain an AbsentFuture conflict set, so that we can look up by transaction, not just by element
+
+            //BORIS DEAD
+            // //Clone the fully_collapsed_mask from the view's data_mask
+            // let mut new_mask = self.data_mask.clone();
+
+            //Sets to hold the transactions we'll be processing
+            let mut freely_collapsible_transactions = im::HashSet::new();
+            let mut conflicting_transactions = im::HashSet::new();
+
+            //A set of the transactions that we know we conflict with, given the transactions we've already looked at
+            let mut conflict_master_set = im::HashSet::new();
+
+            //Loop over each query result
+            for element_id in self.query_result_elements_iter() {
+
+                match self.get_element_status(element_id) {
+                    QWSElementStatus::KnownAbsent => (), //If the result is absent then we don't need to worry about it
+                    QWSElementStatus::KnownPresent => (), //If the result is already present, nothing to do with it
+                    QWSElementStatus::Unknown => unreachable!(), //There shouldn't be any Unknown elements in our world
+                    QWSElementStatus::Superposition => {
+                        //If the result is in superposition, then try to collapse the element's creator transaction into
+                        //  the fully_collapsed_mask
+                        let creator_transaction_id = self.quantum_world.elements.get(element_id).unwrap().created_by; //unwrap should never fail because we got the element_id from the iterator
+
+                        //See if we've already processed this transaction
+                        if !freely_collapsible_transactions.contains(&creator_transaction_id) &&
+                        !conflicting_transactions.contains(&creator_transaction_id) {
+
+                            //Bring the transaction up to date before making a determination about whether it conflicts or not
+                            let transaction_record = &self.quantum_world.transactions[creator_transaction_id.0];
+                            self.quantum_world.sync_transactions_with_mask(&transaction_record.data_mask).unwrap(); //If this unwrap fails, it's an internal error and needs to be debugged
+
+                            //Get the transaction's data_mask contents
+                            let transaction_mask_contents = transaction_record.data_mask.contents.borrow();
+
+                            //BORIS DEAD
+                            //Attempt to merge the creator transaction's mask into the new fully collapsed mask
+                            // let function_result = new_mask.merge_for_collapse(&transaction_record.data_mask);
+                            
+                            // if !function_result.is_err() {
+                            //     //If the collapse succeeded, add the creator transaction to the additional_collapsed_transactions set
+                            //     newly_collapsed_transactions.insert(creator_transaction_id);
+                            // } else {
+                            //     //If the collapse failed, add the transaction to the conflicting_transactions set
+                            //     conflicting_transactions.insert(creator_transaction_id);
+
+                            //     //And then find the counter-transaction that we already merged, that caused us to fail.  Pluck it out
+                            //     //  of the additional_collapsed_transactions set and also add it to the conflicting_transactions set.
+
+                            // }
+
+                            //See if the transaction conflicts with any of the ones we've already looked at
+                            if !conflict_master_set.contains(&creator_transaction_id) {
+                                //If there is no conflict, add the creator transaction to the freely_collapsible_transactions set
+                                freely_collapsible_transactions.insert(creator_transaction_id);
+        println!("Boris FREE Collapse {}", creator_transaction_id);
+                            } else {
+                                //If there is a conflict, add the transaction to the conflicting_transactions set
+                                conflicting_transactions.insert(creator_transaction_id);
+        println!("Boris CONFLICT {}", creator_transaction_id);
+
+                                //And then find the counter-transactions that caused us to fail.  Pluck them out
+                                //  of the freely_collapsible_transactions set and add them to the conflicting_transactions set.
+                                //Conflicts should be reciprocal, so the intersection set of the freely_collapsible_transactions set
+                                //  and this transaction's conflict set should be the transactions we need to move
+        println!("Transaction Past conflict el.1= {}, el.2= {}", transaction_mask_contents.conflicting_transactions.iter().nth(0).unwrap(), transaction_mask_contents.conflicting_transactions.iter().nth(1).unwrap());
+                                let transaction_conflicting_transactions = transaction_mask_contents.conflicting_transactions.clone().union(transaction_mask_contents.future_conflicting_transactions.clone());
+        println!("ConflictList len {}", transaction_conflicting_transactions.iter().count());
+                                let conflicting_counter_transactions = freely_collapsible_transactions.clone().intersection(transaction_conflicting_transactions);
+        println!("CounterTransaction Len {}", conflicting_counter_transactions.iter().count());
+                                let new_freely_collapsible_transactions = freely_collapsible_transactions.relative_complement(conflicting_counter_transactions.clone()); //This is a "set subtract"
+                                let new_conflicting_transactions = conflicting_transactions.union(conflicting_counter_transactions); //This is a "set add"
+
+                                freely_collapsible_transactions = new_freely_collapsible_transactions;
+                                conflicting_transactions = new_conflicting_transactions;
+                            }
+
+                            //Add this transaction's conflicts to the conflict_master_set
+                            conflict_master_set = im::HashSet::unions(vec![conflict_master_set,
+                                transaction_mask_contents.conflicting_transactions.clone(),
+                                transaction_mask_contents.future_conflicting_transactions.clone()]);
+                        }   
+                    }
+                }   
+            }
+
+            //BORIS.
+            //NOTES from DEBUGGGING.
+            //Transaction 1 (and others) should have a past conflict with T0, because it deletes elements from T0.  The fact that no such conflict exists is the source of one bug
+            //But I need to contemplate whether it's a bug to have T3 & T4 included in the conflict list.  They inherit their conflicted status from T1 & T2 respectively.
+            //  It would be nice to point out only the conflicting transactions that are "crucial", i.e. at a crossroads.  But that wouldn't be correct in all circumstances.
+            //  For this test, we could get away with only reporting back T0, T1, & T2 as the conflicted transactions, even though T1 has a conflict with T4 and T2 has a conflict
+            //  with T3.  This is because addressing the issue by collapsing any of the T1-T4 transactions effectively takes the conflicting transactions out of consideration.
+            //  But consider what would happen if the query further narrowed the results in an unexpected way.
+            //
+            //DECISION: Inherited conflicts are still conflicts
+            //
+            //BORIS: This also points to the fact that I need a test with 2 different non-conflicting pockets of elements.
+            //  Imaging Creating A1 & B1 all in the same transaction, and then 2 separate transactions, A2 replaces A1, B2 replaces B1,
+            //  Then 2 more, where A3 replaces A2 and B3 replaces B2.  Finally, we collapse B3, and the conflicting transaction iter should
+            //  only allow iteration of the A transactions.
+
+            //BORIS
+            for trans in conflicting_transactions.iter() {
+                println!("RESULT!!!  T= {}", trans);
+            }
+     
+            let new_plan = QWSFullCollapsePlan{
+                //already_fully_collapsed : false,
+                //fully_collapsed_mask : new_mask, BORIS dead
+                freely_collapsible_transactions : freely_collapsible_transactions.into_iter().collect(),
+                conflicting_transactions : conflicting_transactions.into_iter().collect(),
+            };
+
+            self.full_collapse_plan = Some(new_plan);
         }
     }
 }
@@ -687,6 +979,8 @@ impl Iterator for QWSElementsIterator<'_, '_> {
 impl QWSQueryMask {
 
     //Creates a new empty QWSQueryMask, where all known elements are in superposition
+    //BORIS, this comment likely unnecessary... NOTE: This should only be called when a new QuantumWorldState is created, to create the uncollapsed_mask.  All subsequent operations
+    //  that require a mask should clone an existing one
     fn new(consistent_to : QWSTransactionID) -> QWSQueryMask {
         QWSQueryMask {
             contents : RefCell::new(QWSQueryMaskContents {
@@ -694,6 +988,10 @@ impl QWSQueryMask {
                 settled_absent_elements : im::HashSet::new(),
                 future_absent_elements : im::HashMap::new(),
                 dependent_elements : im::HashSet::new(),
+                conflicting_transactions : im::HashSet::new(),
+                future_conflicting_transactions : im::HashSet::new(),
+//                conflicting_superposition_elements : im::HashMap::new(), BORIS
+//                non_conflicting_transactions : im::HashSet::new(),
                 consistent_to : consistent_to
             })
         }
@@ -710,7 +1008,7 @@ impl QWSQueryMask {
     //
     //"Cloning Behavior" Rules:
     //1. Make sure neither mask's Dependent set conflicts with the other mask's AbsentPast set, if they do then it's an error
-    //2. union the two AbsentPast sets
+    //2. union the two AbsentPast sets and the two conflicting_transactions sets
     //3. Evaluate each absentFuture entry we're merging in, examining each transaction, and if that transaction conflicts
     //      with the mask we're merging, then degenerate the AbsentFuture entry to an absentPast entry, and if not,
     //      ignore the element, effectively makeing it Superposition.
@@ -728,41 +1026,40 @@ impl QWSQueryMask {
             return Err(QWSError::MiscErr(format!("CONFLICT on element: {} when attempting to create transaction", conflicting_element_id)));
         }
 
-        //RULE 2.) Merge the AbsentPast element sets
-        //NOTE: this swap saves us needing to clone the HashSet, but instead we need to create and discard an empty set.
+        //RULE 2.) Merge the AbsentPast element sets and the conflicting_transactions sets
+        //NOTE: this swap saves us needing to clone out HashSets, but instead we need to create and discard an empty set.
+        //Cloning the other mask's sets seems unavoidable given the API, but better to clone one mask's sets than both.
         //  I haven't measured to see if we actually come out ahead.
         let mut temp_set = im::HashSet::new();
         swap(&mut self_contents.settled_absent_elements, &mut temp_set);
         self_contents.settled_absent_elements = temp_set.union(other_contents.settled_absent_elements.clone());
+        let mut temp_set = im::HashSet::new();
+        swap(&mut self_contents.conflicting_transactions, &mut temp_set);
+        self_contents.conflicting_transactions = temp_set.union(other_contents.conflicting_transactions.clone());
 
         //RULE 3.) Evaluate the AbsentFuture elements in the other_mask to see whether we should promote it to a settled_absent element
         let mut conflict_cache : std::collections::HashMap<QWSTransactionID, bool> = std::collections::HashMap::with_capacity(8); //A temporary cache so we don't end up checking the same transactions multiple times
         for (&future_absent_element, transaction_id_vec) in other_contents.future_absent_elements.iter() {
 
-            let mut should_flag_as_settled_absent = false;
             for transaction_id in transaction_id_vec.iter() {
 
                 if let Some(cached_status) = conflict_cache.get(transaction_id) {
                     if *cached_status {
-                        should_flag_as_settled_absent = true;
-                        break;
+                        self_contents.settled_absent_elements.insert(future_absent_element);
+                        QWSQueryMask::add_conflicting_transaction(self_contents, *transaction_id)?;
                     }
                 } else {
                     let referenced_transaction = &transactions[transaction_id.0]; //If we have an invalid TransactionID, it's an internal bug and panicking is the right thing to do
 
                     if QWSQueryMask::check_for_conflicts(self_contents, &(*referenced_transaction.data_mask.contents.borrow()), None) {
-                        should_flag_as_settled_absent = true;
+                        self_contents.settled_absent_elements.insert(future_absent_element);
+                        QWSQueryMask::add_conflicting_transaction(self_contents, *transaction_id)?;
                         conflict_cache.insert(*transaction_id, true);
-                        break;
                     } else {
                         conflict_cache.insert(*transaction_id, false);
                     }
                 }
-            }
-            
-            if should_flag_as_settled_absent {
-                self_contents.settled_absent_elements.insert(future_absent_element);
-            }
+            }            
         }
 
         //RULE 4.) There is no RULE 4!
@@ -778,18 +1075,21 @@ impl QWSQueryMask {
     //1. Promote every entry in the AbsentFuture set to the AbsentPast set.  (In this case, the description of "settled" is
     //      more appropriate than the description of "past")  Since the end result will be a merged mask, we'll actually
     //      promote AbsentFuture entries in other_mask into AbsentPast entries in self.  It shouldn't actually matter, and
-    //      we have mutable access to self.
+    //      we have mutable access to self.  Also promote the conflicting_transactions in the process.
     //2. Make sure neither mask's Dependent set conflicts with the other mask's AbsentPast set, if they do then it's an error
-    //3. union the two AbsentPast sets
+    //3. union the two AbsentPast sets and conflicting_transactions sets
     //4. union the two Present sets
     fn merge_for_collapse(&mut self, other_mask : &QWSQueryMask) -> Result<(), QWSError> {
 
         let self_contents = self.contents.get_mut();
         let other_contents = &(*other_mask.contents.borrow());
 
-        //RULE 1.) Promote AbsentFuture entries to settled_absent elements
-        for (&future_absent_element, _transaction_id_vec) in other_contents.future_absent_elements.iter() {            
+        //RULE 1.) Promote AbsentFuture entries to settled_absent elements, and promote their transactions to full-on conflicts
+        for (&future_absent_element, transaction_id_vec) in other_contents.future_absent_elements.iter() {            
             self_contents.settled_absent_elements.insert(future_absent_element);
+            for &conflicting_transaction_id in transaction_id_vec {
+                QWSQueryMask::add_conflicting_transaction(self_contents, conflicting_transaction_id)?;
+            }
         }
 
         //RULE 2.) Make sure there are no conflicts between Dependent and AbsentPast elements
@@ -802,6 +1102,9 @@ impl QWSQueryMask {
         let mut temp_set = im::HashSet::new();
         swap(&mut self_contents.settled_absent_elements, &mut temp_set);
         self_contents.settled_absent_elements = temp_set.union(other_contents.settled_absent_elements.clone());
+        let mut temp_set = im::HashSet::new();
+        swap(&mut self_contents.conflicting_transactions, &mut temp_set);
+        self_contents.conflicting_transactions = temp_set.union(other_contents.conflicting_transactions.clone());
         
         //RULE 4.) Merge the Present element sets (See NOTE on Rule 2 for merge_for_base)
         let mut temp_set = im::HashSet::new();
@@ -884,6 +1187,12 @@ impl QWSQueryMask {
         Ok(())
     }
 
+    fn add_conflicting_transaction(mask_contents : &mut QWSQueryMaskContents, transaction_id : QWSTransactionID) -> Result<(), QWSError> {
+
+        mask_contents.conflicting_transactions.insert(transaction_id);
+        Ok(())
+    }
+
     //Add an AbsentFuture entry for an element.
     // First check to see if the future_absent_elements map contains a vec for this element, and append the transaction id to that vec
     //  if it already exists, otherwise we need to create a new SmallVec.
@@ -906,9 +1215,12 @@ impl QWSQueryMask {
                 //  get a performance boost from increasing the allocation size.  (Currently 1)
             } else {
                 mask_contents.future_absent_elements.insert(element, smallvec![blame_transaction]);
-            }    
+            }
         }
-        
+
+        //Record the transaction in the future_conflicting_transactions set
+        mask_contents.future_conflicting_transactions.insert(blame_transaction);
+    
         Ok(())
     }
 
@@ -920,7 +1232,7 @@ impl QWSQueryMask {
         if let Some(source_vec) = mask_contents.future_absent_elements.get(&element_to_propagate) {
 
             //NOTE: We end up making one extra clone here that could be avoided if we refactored this function with two code paths
-            //It probably won't matter.
+            //It probably won't matter for performance.
             let cloned_source_vec = source_vec.clone();
 
             for &element in elements {
@@ -932,7 +1244,11 @@ impl QWSQueryMask {
                 } else {
                     mask_contents.future_absent_elements.insert(element, cloned_source_vec.clone());
                 }    
-            }    
+            }
+
+            //Note: There shouldn't be a need to update the future_conflicting_transactions set, because every transaction we're working
+            // with in this function comes from an existing future_absent_elements entry and therefore is already accounted for in
+            // future_conflicting_transactions
         }
         
         Ok(())
@@ -1292,6 +1608,80 @@ mod tests {
             ]).is_err(), "transaction should be impossible to create!");
     }
 
+    #[test]
+    fn conflicting_transaction_exploration() {
+        let mut quantum_world_state = QuantumWorldState::new();
+
+        //This chart shows what the status of each element should be internally at each transaction epoch
+        // Af=AbsentFuture, P=Present, S=Superposition, Ap=AbsentPast
+        //    |                              | Based from    |  A1  A2  A3  B1  B2  B3
+        // T0 |	Create A1 & B1               | -             |  P   Af  Af  P   Af  Af
+        // T1 | Delete A1 & B1, Create A2    | T0            |  Ap  P   S   Ap  Ap  Ap
+        // T2 | Delete A1 & B1, Create B2    | T0            |  Ap  Ap  Ap  Ap  P   S
+        // T3 | Entangle A2, Create A3       | T1            |  Ap  P   P   Ap  Ap  Ap
+        // T4 | Entangle B2, Create B3       | T2            |  Ap  Ap  Ap  Ap  P   P
+
+        let t0_id = quantum_world_state.add_transaction(&[], &[], vec![
+            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A1")),
+            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "B1")),
+            ]).unwrap().id();
+        let created_element_ids = quantum_world_state.get_transaction(t0_id).unwrap().created_elements();
+        let (a1_id, b1_id) = (created_element_ids[0], created_element_ids[1]);
+    
+        let t1_id = quantum_world_state.add_transaction(&[a1_id, b1_id], &[], vec![
+            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A2")),
+            ]).unwrap().id();
+        let a2_id = quantum_world_state.get_transaction(t1_id).unwrap().created_elements()[0];
+
+        let t2_id = quantum_world_state.add_transaction(&[a1_id, b1_id], &[], vec![
+            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "B2")),
+            ]).unwrap().id();
+        let b2_id = quantum_world_state.get_transaction(t2_id).unwrap().created_elements()[0];
+
+        let t3_id = quantum_world_state.add_transaction(&[], &[a2_id], vec![
+            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A3")),
+            ]).unwrap().id();
+        let a3_id = quantum_world_state.get_transaction(t3_id).unwrap().created_elements()[0];
+
+        let t4_id = quantum_world_state.add_transaction(&[], &[b2_id], vec![
+            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "B3")),
+            ]).unwrap().id();
+        let b3_id = quantum_world_state.get_transaction(t4_id).unwrap().created_elements()[0];
+
+        //Try to fully collapse uncollapsed view, should fail.
+        //BORIS, uncomment this when it works
+        //assert!(quantum_world_state.new_view().fully_collapse().is_err(), "view contains conflicting states so shouldn't be fully collapsible!");
+
+        //Get the conflicting transactions; there should be 5 results, all transactions.
+        //This is because every transactions has a conflict with at least one other uncollapsed transaction
+        let mut the_view = quantum_world_state.new_view();
+        let conflicting_transactions = the_view.get_conflicting_transactions();
+println!("BORIS !! {}", conflicting_transactions.len());
+
+        //Partially Collapse T0
+        the_view = the_view.collapse(&[t0_id]).unwrap();
+        //Check the conflicting transactions, There should be zero results
+        assert_eq!(the_view.get_conflicting_transactions().len(), 0);
+//Try to fully collapse, should succeed because all other transactions are incompatible with T0 and have already been excluded BORIS
+
+        //Partially Collapse T1
+        //Try to fully collapse, should succeed
+//Get an iterator for conflicting transactions, should be empty
+//Iterate the elements, shoould give 2 results, A2 & A3
+
+        //Partially Collapse T2
+        let mut the_view = quantum_world_state.new_view().collapse(&[t2_id]).unwrap();
+        assert_eq!(the_view.get_conflicting_transactions().len(), 0);
+//Get an iterator for conflicting transactions, should be empty
+//Iterate the elements, B2 should be Present, and B3 should be in Superposition
+
+//Try to fully collapse, should succeed 
+//Iterate the elements, should give 2 results, B2 & B3, both present
+
+
+
+    }
+
 }
 
 
@@ -1313,4 +1703,79 @@ mod tests {
 //
 //
 //
+//BEGIN BORIS
+//
+//What should the API for asking about uncollapsed transactions look like??????????????????
+//Initially, I was thinking I could just iterate all of the superposition elements, and get their creation transaction,
+//and provide an iterator that iterates over those transactions, keeping a HashSet, so that I could avoid providing the
+//same transaction twice.
+//
+//Turns out that isn't very useful.  If a client started to iterate that list, they'd still have an uncollapsed view
+//after collapsing around each transaction provided by the iterator.  If they used the same iterator to continue collapse,
+//some plausible states would not be visited, and just as problematically, some transactions would preclude the collapse of
+//some other transactions.  If the client wanted to visit every possible fully-collapsed end-state, they would need to
+//recursively perform the "get iterator, collapse transaction" loop recusrively with a new iterator for each recursive call
+//That is N FACTORIAL operations.  Not to mention the fact that the same state would be visited countless times because
+//the order of collapse doesn't matter to the end state you arrive at, but the algorithm would visit the same end state
+//through every possible combinitoric ordering of collapses that get you there.
+//
+//So... Take a step back... What does the client *Want* to do???  Get to fully collapsed states...  But which ones?
+//
+//There are two issues to think about.
+// 1.) truly unrelated (not entangled anywhere) elements lead to a combinatoric explosion of end-states, as each possible
+//state for one subset needs to be matched with each possible state for another subset.  Multiple subsets creates an
+//intractible problem.
+//
+//So maybe we want to be able to iterate over these "subsets" somehow.  But I'm not sure exactly how to define them in
+//the API (i.e. what the client would use to refer to them)
+//
+// 2.) Some transactions are logically grouped into "chains", where one deletes elements from another and onward.  Often
+//the client might not care less about the mid-point of a chain than the end point.  So maybe we want to be able to follow
+//a transaction forward to the number of "dependent terminal states".  i.e. each terminal transaction (transaction without
+//dependents) that has a line of dependency on the specified transaction.  hmmmmmmm.  I'm not sure if this is desireable.
+//
+//Another perspective is that we're really interested in the conflicts.  i.e. The transactions that are exclusive of other
+//transactions.  Some conflicts occur along the same chain, but the more interesting kind is when a chain forks.
+//
+//------------------------------------------------------------------------------------------------------------
+//DECISION: We are going to provide two new APIs.  One API performs "fully_collapse" of a view, where every superposition
+//  element becomes a KnownAbsent or KnownPresent.  If that isn't possible, then the call fails.
+//The other API provides a "conflicting_transactions_iter"  Conflicting transactions will always come as two or more.
+//  If there are no conflicting transactions, then the fully_collapse call will succeed, otherwise it will fail.
+//
+//To implement the conflicting_transactions list, we want to keep a set with every data_mask.
+//  merge_for_base can potentially add to the conflicting transactions.  merge_for_collapse potentially reduces the number of
+//  conflicting transactions
+//
+//
+//IDEA: Also, it would be very handy (probably necessary in some cases) to support "OR" entanglements.  An OR entanglement
+//  says that any of a set of elements would satisfy the conditions for a transaction.  Therefore, it offers the ability to
+//  join two chains that were previously forked.  In plain English: "There are many ways to get to this state, but all that
+//  matters is that you got here, not which path you took to do it".  The issue comes up if both (or multiple) of the different 
+//  OR-entangled elements conflict with each other.
+//
+//Counter-Argument: Transactions aren't created in a vaccuum ahead of time.  They are created by a client in response to some
+//  processing based on the current state of the world.  By definition, this feature is only needed for elements that DO
+//  conflict with each other, because elements that don't conflict could be entangled together by the client at the time the
+//  new transaction is created.  So the client chooses which state, among the conflicting states, to carry forward from, and
+//  the result is a new element or set of elements representing the end result.  The fact that there were multiple paths that
+//  could have lead here but the client chose this path is irrelevant.  In summary, If it matters which path the client took,
+//  then that choice matters, and the paths should still evolve separately, and if it doesn't matter then it also doesn't
+//  matter that there were multiple ways to get to a given place, only that we got there.
+//
+//In practical terms, consider using non-conflicting elements instead of conflicting elements.  For example, for the "document-
+//  wide date format" problem, instead of replacing every date string element with a "unparsed date + format mask" element, and
+//  then comparing all the formats and replaciong them with their parsed equivalents in one transaction, consider instead using
+//  a separate transaction to generate an entanged "format mask hint" element from every unparsed date string, and then a
+//  transaction that deletes all the hints replacing them with a "document-wide date format" element, which is then entangled
+//  by separate transactions that parse each individual date by reading (and thus entangling) the document-wide date format.
+//
+//
+//
+//
+//
+//Paul Sutter (ex apple, founder of quantcast)
+//Phil Stilwell (guy from coffee shop)
+//
+//END BORIS
 //
