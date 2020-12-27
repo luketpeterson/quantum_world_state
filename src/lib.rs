@@ -15,7 +15,7 @@
 //! 
 //! Each element can be thought of as a database record.  An element can be any Rust type that implements the [QWSElement](QWSElement) trait, but ownership of the object must be given to the QWS.
 //! An element must have a specified type which is a searchable field.  Each element is assigned a unique [QWSElementID](QWSElementID) that can always be used to locate that element in the world.
-//! The QWS is an *append-only* (JOSH QUESTION, am I using this word correctly?) data store, so you cannot modify elements after they have been added to the world, but a
+//! The QWS is an *append-only* data store, so you cannot modify an element after it has been added to the world, but a
 //! transaction may delete a given element and replace it with a newer version.  Each version of the element will
 //! have its own unique QWSElementID.
 //! 
@@ -25,21 +25,38 @@
 //! a transaction, and that effectively removes the element from a branch representing one possible reality, but an alternate history in
 //! which that element continues to exist is also possible and can't be removed.
 //! 
+// BORIS, Add a method to visit every fully-collapsed state with a closure 
+//! 
 //! Transactions create and destroy elements.  The process of creating a transaction involves providing 3 sets of elements:  
-//! * The elements created by the transaction
+//! * The elements created by the transaction (i.e. the elements added to the world)
 //! * The elements destroyed by the transaction
 //! * The elements entangled by the transaction
 //! 
-//! Entanglement occurs when an element is read to influence at least one of the elements being created.  Conceptually you can think of entanglement
-//! as expressing a dependency - if the entangled element weren't present, it would have been impossible to create the created elements, so therefore
-//! the created elements don't exist in the versions of the world where the entangled elements don't exist.
+//! Entanglement occurs when an element is read in order to influence at least one of the elements being created.  Conceptually you can think of entanglement
+//! as expressing a dependency.  In other words, if the entangled element weren't present, it would have been impossible to create at least one of the elements, so therefore
+//! the created elements can't exist in the versions of the world where the entangled elements don't also exist.
 //! 
-//! The state of the world at any given instant is referred to an Epoch.  In a given epoch, each element can be in one of the states of existance
+//! The state of the world at any given instant is referred to an Epoch.  In a given epoch, each element will be in one of the states of existance
 //! defined in the [QWSElementStatus](QWSElementStatus) enum.  A transaction exists at an epoch.
 //! 
-//! BORIS: SAMPLE CODE TO ADD A TRANSACTION
+//! # Adding Some Elements and Transactions
+//!
+//! ```
+//! use quantum_world_state::*;
+//! let mut qws = QuantumWorldState::new();
 //! 
-//! # Queries
+//! // Create an object that will become our first element
+//! let forty_two_element = QWSElementWrapper::new(QWSElementType::Unspecified, 42);
+//! 
+//! // Add it to the QWS with a new transaction, and get back the new ElementID
+//! let forty_two_id = qws.add_transaction(&[], &[], vec![Box::new(forty_two_element)])
+//!     .unwrap().created_elements()[0];
+//! 
+//! // Create another transaction that destroys 42 and adds 43
+//! qws.add_transaction(&[forty_two_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 43))]);
+//! ```
+//! 
+//! # Queries and Views
 //! 
 //! The QuantumWorldState can be queried to find elements matching a query expression.  For now, the only query expression implemented is
 //! "element.type == t", although conceptually this could be extended to allow other more expressive queries, including compound queries
@@ -48,11 +65,59 @@
 //! Queries are issued through the [QWSDataView](QWSDataView) object.  Effectively, a view object is a perspective from which elements are 
 //! visible, and a query may limit the visible elements to the subset that match the query.
 //! 
-//! BORIS: SAMPLE CODE TO ISSUE A SIMPLE QUERY
+//! ```
+//! # use quantum_world_state::*;
+//! # let mut qws = QuantumWorldState::new();
+//! # let forty_two_id = qws.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 42))]).unwrap().created_elements()[0];
+//! # qws.add_transaction(&[forty_two_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 43))]);
+//! // Get a view of the queried elements
+//! let query_view = qws.new_view().query_by_type(QWSElementType::Unspecified).unwrap();
 //! 
-//! # Collapse
+//! // Iterate over the query results
+//! for element_id in query_view.elements_iter() {
+//!     // Prints "element 42" and "element 43" when run with the QWS from above
+//!     println!("element {}", qws.get_element(element_id).unwrap().get_payload::<i32>().unwrap());
+//! }
+//! ```
 //! 
-//! BORIS: TODO
+//! # Superposition and Collapse
+//! 
+//! [QWSDataView](QWSDataView)s can also be collapsed to restrict which elements are found by the query.  In our example from above, element 42 and element 43
+//! are mutually exclusive because element 43 was created in a transaction that destroyed element 42.  Our query above returned both elements.  
+//! However the elements have a status of [Superposition](QWSElementStatus::Superposition), indicating that they may or may not exist.
+//! 
+//! ```
+//! # use quantum_world_state::*;
+//! # let mut qws = QuantumWorldState::new();
+//! # let forty_two_id = qws.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 42))]).unwrap().created_elements()[0];
+//! # qws.add_transaction(&[forty_two_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 43))]);
+//! # let query_view = qws.new_view().query_by_type(QWSElementType::Unspecified).unwrap();
+//! // We see that element 42 is in Superposition, in the query view we created above
+//! println!("status of 42 = {}", query_view.get_element_status(forty_two_id));
+//! ```
+//! 
+//! In order to be sure an element exists, the view must be collapsed with respect to that element.  We do that with the `collapse()` method of the [QWSDataView](QWSDataView).
+//! 
+//! ```
+//! # use quantum_world_state::*;
+//! # let mut qws = QuantumWorldState::new();
+//! # let forty_two_id = qws.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 42))]).unwrap().created_elements()[0];
+//! # qws.add_transaction(&[forty_two_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 43))]);
+//! # let query_view = qws.new_view().query_by_type(QWSElementType::Unspecified).unwrap();
+//! // Get the transaction id for the transaction that created element 42
+//! let transaction_id = qws.get_creator_transaction(forty_two_id).unwrap().id();
+//! 
+//! // Collapse the view further around that transaction 
+//! let query_view = query_view.collapse(&[transaction_id]).unwrap();
+//!
+//! // Now we see that element 42 is in KnownPresent, from the perspective of the view
+//! println!("status of 42 = {}", query_view.get_element_status(forty_two_id));
+//! 
+//! // And we only see "element 42" when we iterate over the query results
+//! for element_id in query_view.elements_iter() {
+//!     println!("element {}", qws.get_element(element_id).unwrap().get_payload::<i32>().unwrap());
+//! }
+//! ```
 //! 
 //! # Conceptual Example
 //! 
@@ -70,16 +135,18 @@
 //! If I issue the query without collapsing the epoch, I will get the results: [Apple-P, BaseballGameTicket-P, FiveDollarBill-S, Sandwich-S],
 //! where 'P' denotes that an element is [KnownPresent](QWSElementStatus::KnownPresent) and 'S' denotes that the element is in [Superposition](QWSElementStatus::Superposition).
 //! 
-//! Now let's consider an alternative reality in which I was less responsible or more thirsty.  Say I chose to spend the FiveDollarBill on
+//! Now let's consider an alternate reality in which I was less responsible or more thirsty.  Say I chose to spend the FiveDollarBill on
 //! a SixPackOfBeer instead. (It's really cheap beer.)  Now there are 3 possible result sets that could be returned in 3 different Epoches:
 //! 1:[Apple, BaseballGameTicket, FiveDollarBill], 2:[Apple, BaseballGameTicket, Sandwich], 3:[Apple, BaseballGameTicket, SixPackOfBeer].
 //!
-//! But I can collapse the view so that only results in which I have SixPackOfBeer are included, and therefore reducing my results down to only:
+//! But I can collapse the view such that I only see results in which I have a SixPackOfBeer, thus reducing my possible result sets to only:
 //! [Apple, BaseballGameTicket, SixPackOfBeer].  This is referred to a partially collapsed view, because only results that
 //! are compatible with SixPackOfBeer are included.  However, this it is not a fully collapsed view because no entanglement
 //! exists between SixPackOfBeer and the Apple and BaseballGameTicket.
 //!
-//! Continuing this example, If I traded the BaseballGameTicket for a ZooTicket, I would still be free to decide whether to buy
+//! ## Full vs. Partial Collapae ##
+//! 
+//! Continuing the example, If I traded the BaseballGameTicket for a ZooTicket, I would still be free to decide whether to buy
 //! the SixPackOfBeer or the Sandwich.  In that situation, I can still collapse the view around the SixPackOfBeer and thus the set of possible fully collapsed world states would be:
 //! 1:[Apple, BaseballGameTicket, SixPackOfBeer], 2:[Apple, ZooTicket, SixPackOfBeer].
 //!
@@ -92,7 +159,7 @@
 //! depends on BaseballGameTicket up to the point that BallParkHotDog is created, but nothing related to the BallParkHotDog has any
 //! effect on BaseballGameTicket.  Asymetric entanglement is created when one element is non-destructively used as input in the process
 //! of creating another element.  This differs from real quantum physics, in which every interaction entangles all particles involved in
-//! that interaction.
+//! that interaction, and nothing can influence something else without being influenced itself.
 //!
 //! If the quantum physics metaphor is a little alien, luckily we software people are already acquainted with these concepts through
 //! distributed source control systems such as git.  We can think of a git repository as a QuantumWorldState of the state of all of
@@ -105,22 +172,15 @@
 //! * Every element was created by exactly one transaction, so for any element, there is at least one epoch where it is known to exist
 //! * Transactions entangle elements, so by extension transactions have dependencies and conflicts with other transactions
 //! * Transactions can be arranged into a branching tree
-
-
-use std::mem::{*};
-use std::cell::{RefCell};
-use std::any::Any;
-use std::fmt::{Display, Error, Formatter};
-
-extern crate smallvec;
-use smallvec::*;
-extern crate derive_more;
-
-//The implementation of this object has some similarities to a brute-force solver for the Boolean Satisfiability Problem.
-//https://en.wikipedia.org/wiki/Boolean_satisfiability_problem
+//! 
+//! # Misc
+//! 
+//! The implementation of this object has some similarities to a solver for the [Boolean Satisfiability Problem](https://en.wikipedia.org/wiki/Boolean_satisfiability_problem).
+//! Perhaps there are some insights to be gained from the academic research on that topic.
+//! 
 //
 //Eventually, if (when) this becomes a bottleneck, I'd like to investigate better implementations, and possibly better
-//interfaces to get more performance.
+// interfaces to get more performance.
 //
 //Currently we're using immutable HashSets and HashMaps for the QueryMasks on the theory that cloning them is cheap.  However
 //  we also end up performing a lot of union operations in situations where it is highly possible both sets will contain a
@@ -135,22 +195,14 @@ extern crate derive_more;
 //When we get to this stage, consider looking at Noria Database, as well as the TimelyDataflow Rust crate.
 //  
 
+use std::mem::{*};
+use std::cell::{RefCell};
+use std::any::Any;
+use std::fmt::{Display, Error, Formatter};
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+extern crate smallvec;
+use smallvec::*;
+extern crate derive_more;
 
 ///An element in the QuantumWorldState must implement this trait.  
 /// 
@@ -266,7 +318,7 @@ pub enum QWSError {
 pub struct QuantumWorldState {
 
     elements : QWSElementStore,         //The object that owns all elements in the QWS
-    transactions : Vec<QWSTransaction>,   //The table that records all of the QWS Transactions
+    transactions : Vec<QWSTransactionRecord>, //The table that records all of the QWS Transactions
     uncollapsed_mask : QWSQueryMask //The mask that reflects the totally uncollapsed world.
         //NOTE: This just records every element in superposition, but it's here so we don't need to recreate
         //it every time we need it.  Right now, creating it from scratch is dirt cheap, but maybe that will
@@ -326,9 +378,18 @@ pub struct QWSElementsIterator<'a, 'b> {
 }
 
 ///Represents a transaction in the [QuantumWorldState](QuantumWorldState), and provides methods to inspect the transaction.
+/// 
+///A QWSTransaction can function as a special kind of view, and can be converted into a view by calling the [view](QWSTransaction::view)() method.
 #[derive(Debug)]
-pub struct QWSTransaction {
+pub struct QWSTransaction<'a> {
+    quantum_world : &'a QuantumWorldState,
     id : QWSTransactionID,
+    record : &'a QWSTransactionRecord
+}
+
+//private: Internal representation of a transaction
+#[derive(Debug)]
+struct QWSTransactionRecord {
     created_elements : Vec<QWSElementID>,
     destroyed_elements : Vec<QWSElementID>,
     entangled_elements : Vec<QWSElementID>,
@@ -575,16 +636,33 @@ impl std::ops::Index<QWSElementID> for QWSElementStore {
     }
 }
 
-impl QWSTransaction {
-
+impl QWSTransactionRecord {
     //private
-    fn new(destroyed_elements : &[QWSElementID], entangled_elements : &[QWSElementID], created_elements : Vec<QWSElementID>, data_mask : QWSQueryMask, new_transaction_id : QWSTransactionID) -> QWSTransaction {
-        QWSTransaction {
-            id : new_transaction_id,
+    fn new(destroyed_elements : &[QWSElementID], entangled_elements : &[QWSElementID], created_elements : Vec<QWSElementID>, data_mask : QWSQueryMask) -> QWSTransactionRecord {
+        QWSTransactionRecord {
             created_elements : created_elements,
             destroyed_elements : destroyed_elements.to_vec(),
             entangled_elements : entangled_elements.to_vec(),
             data_mask : data_mask
+        }
+    }
+}
+
+impl <'a>QWSTransaction<'a> {
+
+    //private
+    fn new(quantum_world : &'a QuantumWorldState, transaction_id : QWSTransactionID) -> Result<QWSTransaction<'a>, QWSError> {
+
+        if let Some(record) = quantum_world.transactions.get(transaction_id.0) {
+            Ok(
+                QWSTransaction {
+                    quantum_world : quantum_world,
+                    id : transaction_id,
+                    record : record
+                }        
+            )
+        } else {
+            Err(QWSError::MiscErr(format!("PARAMETER ERROR: Specified transaction_id doesn't exist.")))
         }
     }
 
@@ -595,17 +673,48 @@ impl QWSTransaction {
 
     ///Returns a reference to a slice containing all the [QWSElementID](QWSElementID)s of elements created by the transaction.
     pub fn created_elements(&self) -> &[QWSElementID] {
-        &self.created_elements[..]
+        &self.record.created_elements[..]
     }
 
     ///Returns a reference to a slice containing all the [QWSElementID](QWSElementID)s of elements destroyed by the transaction.
     pub fn destroyed_elements(&self) -> &[QWSElementID] {
-        &self.destroyed_elements[..]
+        &self.record.destroyed_elements[..]
     }
 
     ///Returns a reference to a slice containing all the [QWSElementID](QWSElementID)s of elements entangled by the transaction.
     pub fn entangled_elements(&self) -> &[QWSElementID] {
-        &self.entangled_elements[..]
+        &self.record.entangled_elements[..]
+    }
+
+    ///Creates a [QWSDataView](QWSDataView) from the QWSTransaction.  Since a transation is already a specific type of view, this transformation is guaranteed to succeed.
+    pub fn view(self) -> QWSDataView<'a> {
+
+        let mut new_view = QWSDataView::new(self.quantum_world);
+
+        new_view.collapsed_transactions.push(self.id());
+        new_view.data_mask = self.record.data_mask.clone();
+        
+        new_view
+    }
+
+    ///Returns true if the specified transaction conflicts with self.  
+    /// Returns false if the two transactions can be sucessfully collapsed along side each other.
+    /// 
+    /// QUESTION: Should we have this API at all???  It's identical to calling self.view.conflicts_with()
+    pub fn conflicts_with(&self, transaction_id : QWSTransactionID) -> bool {
+
+        //Bring both of transaction_record's masks up to date.
+        let transaction_record = &self.quantum_world.transactions[transaction_id.0];
+        self.quantum_world.sync_transactions_with_mask(&transaction_record.data_mask).unwrap();
+
+        let self_mask_contents = &(*self.record.data_mask.contents.borrow());
+        let transaction_mask_contents = &(*transaction_record.data_mask.contents.borrow());
+
+        if QWSQueryMask::check_for_conflicts(self_mask_contents, transaction_mask_contents, None) {
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -627,19 +736,19 @@ impl QuantumWorldState {
         self.elements.get(element_id).map(|record| &(*record.element))
     }
 
-    ///Returns a reference to the [QWSTransaction](QWSTransaction) specified by the transaction_id parameter.  
+    ///Returns a [QWSTransaction](QWSTransaction) object representing the transaction specified by the transaction_id parameter.  
     /// Returns None if transaction_id doesn't specify a valid transaction in the QuantumWorldState
-    pub fn get_transaction(&self, transaction_id : QWSTransactionID) -> Option<&QWSTransaction> {
-        self.transactions.get(transaction_id.0)
+    pub fn get_transaction(&self, transaction_id : QWSTransactionID) -> Result<QWSTransaction, QWSError> {
+        QWSTransaction::new(self, transaction_id)
     }
 
-    ///Returns the id of the transaction responsible for creating the element specified by the element_id parameter.  
+    ///Returns a [QWSTransaction](QWSTransaction) object representing the transaction responsible for creating the element specified by the element_id parameter.  
     /// Returns None if element_id doesn't specify a valid element in the QuantumWorldState
-    pub fn get_creator_transaction(&self, element_id : QWSElementID) -> Option<&QWSTransaction> {
+    pub fn get_creator_transaction(&self, element_id : QWSElementID) -> Result<QWSTransaction, QWSError> {
         if let Some(element) = self.elements.get(element_id) {
             self.get_transaction(element.created_by)
         } else {
-            None
+            Err(QWSError::MiscErr(format!("PARAMETER ERROR: Specified element_id doesn't exist.")))
         }
     }
 
@@ -679,7 +788,7 @@ impl QuantumWorldState {
         elements_to_destroy : &[QWSElementID],
         elements_to_entangle : &[QWSElementID],
         elements_to_add : Vec<Box<dyn QWSElement>>
-    ) -> Result<&QWSTransaction, QWSError> {
+    ) -> Result<QWSTransaction, QWSError> {
 
         //Get the ID for the new transaction we're creating
         let new_transaction_id = QWSTransactionID::from(self.transactions.len());
@@ -737,13 +846,11 @@ impl QuantumWorldState {
         self.elements.add_elements(element_records);
         
         //Create our new transaction record and Push it into the world's table
-        let new_transaction_record = QWSTransaction::new(elements_to_destroy, elements_to_entangle, created_element_ids, new_transaction_data_mask, new_transaction_id);
+        let new_transaction_record = QWSTransactionRecord::new(elements_to_destroy, elements_to_entangle, created_element_ids, new_transaction_data_mask);
         self.transactions.push(new_transaction_record);
 
-        //Get our transaction record out of the table, so we can return it
-        let our_transaction_record = &mut self.transactions[new_transaction_id.0];
-
-        Ok(our_transaction_record)
+        //Build our transaction object so we can return it
+        self.get_transaction(new_transaction_id)
     }
 
     ///Returns a new [QWSDataView](QWSDataView) for the world, in which all elements are in superposition and no query has been applied.
@@ -771,23 +878,23 @@ impl QuantumWorldState {
         let mut transaction_id = mask_contents.consistent_to;
         while transaction_id < QWSTransactionID::from(self.transactions.len()) {
 
-            let transaction = self.get_transaction(transaction_id).unwrap();
+            let transaction_record = &self.transactions[transaction_id.0];
 
             //RULE 1.) If a future transaction attempts to delete a P element, An Af entry is created for each element the transaction
             // creates. In this situation, the Af entry references the future transaction that's being back-propagated.
-            for destroyed_element_id in &transaction.destroyed_elements {
+            for destroyed_element_id in &transaction_record.destroyed_elements {
                 if mask_contents.present_elements.contains(destroyed_element_id) {
-                    QWSQueryMask::add_future_absent_elements(mask_contents, &transaction.created_elements[..], transaction_id)?;
+                    QWSQueryMask::add_future_absent_elements(mask_contents, &transaction_record.created_elements[..], transaction_id)?;
                 }
             }
 
-            let all_entangled_elements_iter = transaction.destroyed_elements.iter().chain(transaction.entangled_elements.iter());
+            let all_entangled_elements_iter = transaction_record.destroyed_elements.iter().chain(transaction_record.entangled_elements.iter());
             for entangled_element_id in all_entangled_elements_iter {
 
                 //RULE 2.) If a future transaction attempts to entangle or delete an Ap element, An Ap entry is created for each element
                 // the transaction creates. (Ap entries don't reference transactions)
                 if mask_contents.settled_absent_elements.contains(entangled_element_id) {
-                    QWSQueryMask::add_settled_absent_elements(mask_contents, &transaction.created_elements[..])?;
+                    QWSQueryMask::add_settled_absent_elements(mask_contents, &transaction_record.created_elements[..])?;
                     QWSQueryMask::add_conflicting_transaction(mask_contents, transaction_id)?;
                 }
 
@@ -796,7 +903,7 @@ impl QuantumWorldState {
                 // that the transaction entangles with (deletion is a form of entanglement)
                 //NOTE: We aren't checking first because of the behavior of propagate_to_future_absent_elements.  It already includes
                 //  the check.  If there is no AbsentFuture entry for element_to_propagate, then it will do nothing
-                QWSQueryMask::propagate_to_future_absent_elements(mask_contents, &transaction.created_elements[..], *entangled_element_id)?;
+                QWSQueryMask::propagate_to_future_absent_elements(mask_contents, &transaction_record.created_elements[..], *entangled_element_id)?;
             }
 
             transaction_id += QWSTransactionID::from(1);
@@ -815,8 +922,7 @@ impl <'a>QWSDataView<'a> {
     //private
     fn new(quantum_world : &'a QuantumWorldState) -> QWSDataView<'a> {
 
-        //Create our new partially collapsed mask
-        //Start with a data_mask for every element in superposition, that represents the QuantumWorldState in totality
+        //Create our new data_mask with every element in superposition, that represents the QuantumWorldState in totality
         let new_data_view = QWSDataView {
             quantum_world : quantum_world,
             collapsed_transactions : vec![],
@@ -889,10 +995,31 @@ impl <'a>QWSDataView<'a> {
         Ok(self)
     }
 
+    ///Returns flase if the specified transaction can be collapsed into the view without any conflicts.
+    /// Returns true if an attempt to collapse the transaction will fail.
+    pub fn conflicts_with(&self, transaction_id : QWSTransactionID) -> bool {
+
+        //Bring the transaction_record's mask up to date.
+        let transaction_record = &self.quantum_world.transactions[transaction_id.0];
+        self.quantum_world.sync_transactions_with_mask(&transaction_record.data_mask).unwrap();
+
+        let self_mask_contents = &(*self.data_mask.contents.borrow());
+        let transaction_mask_contents = &(*transaction_record.data_mask.contents.borrow());
+
+        if QWSQueryMask::check_for_conflicts(self_mask_contents, transaction_mask_contents, None) {
+            true
+        } else {
+            false
+        }
+    }
+
     ///Returns the status for the indicated element from the perspective of the view.
-    //INTERNAL NOTE: Should we return QWSElementStatus::Unknown if the element being asked about is not part of the query??????
-    //  This would require the query abstraction to be able to random-access the elements to determine this, while presently it only
-    //  supports iteration.  But otheriwse should be easy enough to do.  Just a question of whether that is correct behavior or not.
+    /// 
+    /// # OPEN QUESTION
+    /// Should this return QWSElementStatus::Unknown if the element being asked about is not part of the query?  Currently this function
+    /// takes the collapse state of the view into account, but not the query.
+    // INTERNAL NOTE: This would require the query abstraction to be able to random-access the elements to determine this, while presently it only
+    // supports iteration.  But otheriwse should be easy enough to do.  Just a question of whether that is correct behavior or not.
     pub fn get_element_status(&self, element_id : QWSElementID) -> QWSElementStatus {
         if element_id < self.quantum_world.elements.next_new_element_id() { // If the element_id is outside the range tracked by the elements table, the mask won't have a meaningful entry for it either, but we don't want to assume it's in superposition - although, in a sense, it is.
             let internal_status = self.data_mask.get_element_internal_status(element_id);
@@ -929,14 +1056,14 @@ impl <'a>QWSDataView<'a> {
     /// # qws.add_transaction(&[el_a_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 'b'))]).unwrap().created_elements()[0];
     /// #
     /// fn recursive_collapse(current_view : &mut QWSDataView) {
-    ///     let mut view_clone = current_view.clone();
-    ///     if current_view.get_conflicting_transactions().len() > 0 {
-    ///         for &transaction_id in current_view.get_conflicting_transactions() {
-    ///             let mut partially_collapsed_view = view_clone.clone().collapse(&[transaction_id]).unwrap();
+    ///     let conflicting_transactions = current_view.get_conflicting_transactions().to_vec();
+    ///     if conflicting_transactions.len() > 0 {
+    ///         for transaction_id in conflicting_transactions {
+    ///             let mut partially_collapsed_view = current_view.clone().collapse(&[transaction_id]).unwrap();
     ///             recursive_collapse(&mut partially_collapsed_view);
     ///         }
     ///     } else {
-    ///         let mut fully_collapsed_view = view_clone.fully_collapse();
+    ///         let mut _fully_collapsed_view = current_view.clone().fully_collapse();
     ///     }
     /// }
     /// 
@@ -945,7 +1072,7 @@ impl <'a>QWSDataView<'a> {
     ///
     /// # Note
     /// Conceptually, this isn't a mutating API, but we need `&mut self` for internal implementation reasons.  As you can see
-    /// above, this leads to an additional clone() of the view that would otherwise be unnecessary. 
+    /// above, this leads to a suboptimal copy of the slice returned by get_conflicting_transactions() that would otherwise be unnecessary. 
     //INTERNAL NOTE: Conceptually, this shouldn't be a mutating API, but we need a mutable reference to self, because we do the work
     //  to compile the conflicting transactions lazily and we want to store the results inside the object, which will speed up
     //  subsequent calls as well as fully_collapse(), since the two are related.
@@ -1138,7 +1265,7 @@ impl QWSQueryMask {
     //4. There is nothing to do for our AbsentFuture or Present entries.  A freshly created transaction data_mask has no
     //      Present entries except what it created or entangled itself and no AbsentFuture entries whatsoever, because
     //      by definition, AbsentFuture entries occur when a future transaction references the elements Present here.
-    fn merge_for_base(&mut self, other_mask : &QWSQueryMask, transactions : &[QWSTransaction]) -> Result<(), QWSError> {
+    fn merge_for_base(&mut self, other_mask : &QWSQueryMask, transaction_records : &[QWSTransactionRecord]) -> Result<(), QWSError> {
 
         let self_contents = self.contents.get_mut();
         let other_contents = &(*other_mask.contents.borrow());
@@ -1172,7 +1299,7 @@ impl QWSQueryMask {
                         QWSQueryMask::add_conflicting_transaction(self_contents, *transaction_id)?;
                     }
                 } else {
-                    let referenced_transaction = &transactions[transaction_id.0]; //If we have an invalid TransactionID, it's an internal bug and panicking is the right thing to do
+                    let referenced_transaction = &transaction_records[transaction_id.0]; //If we have an invalid TransactionID, it's an internal bug and panicking is the right thing to do
 
                     if QWSQueryMask::check_for_conflicts(self_contents, &(*referenced_transaction.data_mask.contents.borrow()), None) {
                         self_contents.settled_absent_elements.insert(future_absent_element);
@@ -1480,6 +1607,10 @@ mod tests {
         //This tests the logic to back-propagate future transactions to prior epochs.
         assert_eq!(collapsed_view.get_element_status(one_id), QWSElementStatus::KnownAbsent);
 
+        //Test the "conflicts_with" QWSDataView method
+        assert_eq!(collapsed_view.conflicts_with(one_trans_id), true);
+        assert_eq!(collapsed_view.conflicts_with(zero_trans_id), false);
+
         //Confirm that we get an error if we try to collapse around element "One" and element "Two"
         //  at the same time because they can't coexist in the same epoch
         assert!(quantum_world_state.new_view().collapse(&vec![zero_trans_id, one_trans_id]).is_err(), "elements should not be allowed to coexist!");
@@ -1574,8 +1705,8 @@ mod tests {
             Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A1")),
             Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "B1")),
             ]).unwrap().id();
-        let created_element_ids = quantum_world_state.get_transaction(t0_id).unwrap().created_elements();
-        let (a1_id, b1_id) = (created_element_ids[0], created_element_ids[1]);
+        let transaction = quantum_world_state.get_transaction(t0_id).unwrap();
+        let (a1_id, b1_id) = (transaction.created_elements()[0], transaction.created_elements()[1]);
         
         //Add element A2 that destroys A1, and element B2 that destroys b1, in separate transactions.  B2 and A2 shouldn't be entangled with each other
         let &a2_id = quantum_world_state.add_transaction(&vec![a1_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A2"))])
@@ -1744,12 +1875,12 @@ mod tests {
         // T3 | Entangle A2, Create A3       | T1            |  Ap  P   P   Ap  Ap  Ap
         // T4 | Entangle B2, Create B3       | T2            |  Ap  Ap  Ap  Ap  P   P
 
-        let t0_id = quantum_world_state.add_transaction(&[], &[], vec![
+        let transaction = quantum_world_state.add_transaction(&[], &[], vec![
             Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A1")),
             Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "B1")),
-            ]).unwrap().id();
-        let created_element_ids = quantum_world_state.get_transaction(t0_id).unwrap().created_elements();
-        let (a1_id, b1_id) = (created_element_ids[0], created_element_ids[1]);
+            ]).unwrap();
+        let t0_id = transaction.id();
+        let (a1_id, b1_id) = (transaction.created_elements()[0], transaction.created_elements()[1]);
     
         let t1_id = quantum_world_state.add_transaction(&[a1_id, b1_id], &[], vec![
             Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A2")),
@@ -1835,12 +1966,12 @@ mod tests {
         // T3 | Delete B1, Create B2         | T0            |  S   S   S   Ap  P   S
         // T4 | Entangle B2, Create B3       | T3            |  S   S   S   Ap  P   P
 
-        let t0_id = quantum_world_state.add_transaction(&[], &[], vec![
+        let transaction = quantum_world_state.add_transaction(&[], &[], vec![
             Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A1")),
             Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "B1")),
-            ]).unwrap().id();
-        let created_element_ids = quantum_world_state.get_transaction(t0_id).unwrap().created_elements();
-        let (a1_id, b1_id) = (created_element_ids[0], created_element_ids[1]);
+            ]).unwrap();
+        let t0_id = transaction.id();
+        let (a1_id, b1_id) = (transaction.created_elements()[0], transaction.created_elements()[1]);
     
         let t1_id = quantum_world_state.add_transaction(&[a1_id], &[], vec![
             Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A2")),
