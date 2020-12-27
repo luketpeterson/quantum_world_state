@@ -25,8 +25,6 @@
 //! a transaction, and that effectively removes the element from a branch representing one possible reality, but an alternate history in
 //! which that element continues to exist is also possible and can't be removed.
 //! 
-// BORIS, Add a method to visit every fully-collapsed state with a closure 
-//! 
 //! Transactions create and destroy elements.  The process of creating a transaction involves providing 3 sets of elements:  
 //! * The elements created by the transaction (i.e. the elements added to the world)
 //! * The elements destroyed by the transaction
@@ -1092,6 +1090,42 @@ impl <'a>QWSDataView<'a> {
             Some(the_plan) => &the_plan.conflicting_transactions,
             None => unreachable!(), //We just built the full_collapse_plan, it won't be None
         }
+    }
+
+    //private.  Recursive helper function for visit_fully_collapsed_views()
+    fn recursive_collapse<VisitorClosure: Fn(QWSDataView)>(current_view : &mut QWSDataView, visitor_closure : &VisitorClosure) {
+        let conflicting_transactions = current_view.get_conflicting_transactions().to_vec();
+        if conflicting_transactions.len() > 0 {
+            for transaction_id in conflicting_transactions {
+                let mut partially_collapsed_view = current_view.clone().collapse_transactions(&[transaction_id]).unwrap();
+                QWSDataView::recursive_collapse(&mut partially_collapsed_view, visitor_closure);
+            }
+        } else {
+            visitor_closure(current_view.clone().fully_collapse().unwrap()); //If this unwrap fails, it's an internal error
+        }
+    }
+    
+    ///Executes the provided closure for every possible fully collapsed view visible from self
+    /// 
+    /// # Example #
+    /// 
+    /// ```
+    /// # use quantum_world_state::*;
+    /// # let mut qws = QuantumWorldState::new();
+    /// # let el_a_id = qws.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 'a'))]).unwrap().created_elements()[0];
+    /// # qws.add_transaction(&[el_a_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 'b'))]).unwrap().created_elements()[0];
+    /// // Print the number of transactions in each fully-collapsed end-state view
+    /// qws.new_view().visit_fully_collapsed_views(|collapsed_view : QWSDataView| {
+    ///     println!("transaction count = {}", collapsed_view.get_collapsed_transactions().len());
+    /// });
+    /// ```
+    /// 
+    /// # PERFORMANCE WARNING #
+    /// 
+    /// This function can potentially require **O(n!)** time to execute, so you should only call it from views that have manageable characteristics.  
+    /// This function's implementation corresponds to the sample code in [get_conflicting_transactions](QWSDataView::get_conflicting_transactions)().
+    pub fn visit_fully_collapsed_views<VisitorClosure: Fn(QWSDataView)>(&mut self, visitor_closure : VisitorClosure) {
+        QWSDataView::recursive_collapse(self, &visitor_closure);
     }
 
     ///Returns a view that has been narrowed such that only elements whose type matches the supplied element_type parameter are visible
