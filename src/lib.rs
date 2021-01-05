@@ -57,7 +57,7 @@
 //! # Queries and Views
 //! 
 //! The QuantumWorldState can be queried to find elements matching a query expression.  For now, the only query expression implemented is
-//! "element.type == t", although conceptually this could be extended to allow other more expressive queries, including compound queries
+//! "key contains value", although conceptually this could be extended to allow other more expressive queries, including compound queries
 //! e.g. with join operations, etc.
 //! 
 //! Queries are issued through the [QWSDataView](QWSDataView) object.  Effectively, a view object is a perspective from which elements are 
@@ -176,26 +176,38 @@
 //! The implementation of this object has some similarities to a solver for the [Boolean Satisfiability Problem](https://en.wikipedia.org/wiki/Boolean_satisfiability_problem).
 //! Perhaps there are some insights to be gained from the academic research on that topic.
 //! 
+//! # Future Work & Optimization Opportunities
+//! 
+//!Eventually, if (when) this becomes a bottleneck, I'd like to investigate better implementations, and possibly better
+//! interfaces to get more performance.
 //
-//Eventually, if (when) this becomes a bottleneck, I'd like to investigate better implementations, and possibly better
-// interfaces to get more performance.
-//
-//Currently we're using immutable HashSets and HashMaps for the QueryMasks on the theory that cloning them is cheap.  However
-//  we also end up performing a lot of union operations in situations where it is highly possible both sets will contain a
-//  large number of elements.  I am not sure about the performance of union operations in this case although algorithms
-//  definitely exist to optimize this for our use case where we are likely to have many operations that involve very nearly
-//  the same data.  Something along the lines of chunking the sets up with a checksum around each chunk and treating the
-//  entire chunk as one entry.
-//
-//An alternative is to replace the datastore with something like SQLite for the main datastore, in order to support more
-//  elaborate queries.  Another path to consider is a database that supports data-flow programs where the Mask that dictates
-//  the status of each element at a given epoch can actually be a dataflow program to update a materialized view.
-//When we get to this stage, consider looking at Noria Database, as well as the TimelyDataflow Rust crate.
-//  
+//!Currently we're using immutable HashSets and HashMaps for the QueryMasks on the theory that cloning them is cheap.  However
+//! we also end up performing a lot of union operations in situations where it is highly possible both sets will contain a
+//! large number of elements.  I am not sure about the performance of union operations in this case although algorithms
+//! definitely exist to optimize this for our use case where we are likely to have many operations that involve very nearly
+//! the same data.  Something along the lines of chunking the sets up with a checksum around each chunk and treating the
+//! entire chunk as one entry.
+//!
+//!An alternative is to replace the datastore with something like SQLite for the main datastore, in order to support more
+//! elaborate queries.  I'd need to do more research into whether or not SQL could be limited to only select statements
+//! to avoid making destructive changes to the datastore that would make it out of sync with the dependency mask meta-data.
+//!
+//!Another (non-exclusive) path to consider is a database that supports data-flow programs where the Mask that dictates
+//! the status of each element at a given epoch can actually be a dataflow program to update a materialized view.
+//!When we get to this stage, consider looking at Noria Database, as well as the TimelyDataflow Rust crate.
+//!
+//!Finally, as another alternative, it's likely that the Immutable HashSets that I'm using to store the mask are actually
+//! not the best performing data structure for this use case.  Specifically, we know our sets only store numerical IDs
+//! and we also know the IDs are assigned sequentially.  We also know there will be high ammounts of clustering.  Therefore
+//! I suspect that some kind of hierarchicial bitmap datastructure (hierarchical because large blocks of 1s or 0s could)
+//! be represented as small sentenel values and compared and stored more efficiently.  Anyway, we can measure this later
+//! when we know what operations need to be fast.
+//!  
 
 use std::mem::{*};
 use std::cell::{RefCell};
 use std::any::Any;
+use std::hash::{Hash};
 use std::fmt::{Display, Error, Formatter};
 use std::iter::FromIterator;
 
@@ -203,17 +215,125 @@ extern crate smallvec;
 use smallvec::*;
 extern crate derive_more;
 
+extern crate maybe_owned;
+use maybe_owned::*;
+
+#[macro_use] extern crate maplit;
+
+//BORIS DEAD.  Giving QWSMetaData a lifetime bound is just tangles things up too much.
+// What I wanted to do was to make it so that iterating keys that were strings didn't involve string copies.  But this just isn't worth the complexity introduced by putting a reference into QWSMetaData
+//
+// //Consider rolling this MaybeOwnedString and also MaybeOwnedVec out into its own utility library
+// //A variant on maybe_owned::MaybeOwned, except it can either be a Vec or a slice.
+// #[derive(Debug, Clone, Eq, PartialEq, Hash)]
+// pub enum MaybeOwnedString<'a> {
+//     Owned(String),
+//     Borrowed(&'a str),
+// }
+
+// impl <'a>MaybeOwnedString<'a> {
+
+//     pub fn from_str(the_str : &'a str) -> MaybeOwnedString<'a> {
+//         MaybeOwnedString::Borrowed(the_str)
+//     }
+
+//     pub fn from_string(the_string : String) -> MaybeOwnedString<'static> {
+//         MaybeOwnedString::Owned(the_string)
+//     }
+
+//     pub fn as_str(&self) -> &str {
+//         match self {
+//             MaybeOwnedString::Owned(the_string) => {
+//                 the_string.as_str()
+//             }
+//             MaybeOwnedString::Borrowed(the_str) => {
+//                 the_str
+//             }
+//         }
+//     }
+
+//     pub fn to_string(self) -> String {
+//         match self {
+//             MaybeOwnedString::Owned(the_string) => {
+//                 the_string
+//             }
+//             MaybeOwnedString::Borrowed(the_str) => {
+//                 the_str.to_string()
+//             }
+//         }
+//     }
+// }
+
+
 ///An element in the QuantumWorldState must implement this trait.  
 /// 
 ///In the future, I may extend this trait to provide more queryability for elements, e.g. allow an element to
 /// provide additional queryable keys and values, so elements can be indexed and queried by more than just type.
+/// 
+/// # Example Implementation
+/// 
+/// ```
+/// # use quantum_world_state::*;
+/// # use std::collections::*;
+/// # use std::any::Any;
+/// #[derive(Debug)]
+/// struct MyElementType {
+///     meta_data : HashMap<String, String>
+/// }
+/// 
+/// impl QWSElement for MyElementType {
+///     fn element_type(&self) -> QWSElementType {
+///         QWSElementType::Unspecified //BORIS DEAD
+///     }
+/// 
+///     fn meta_data_keys_iter(&self) -> Option<Box<dyn Iterator<Item=QWSMetaData> + '_>> {
+///         Some(Box::new(self.meta_data.keys().map(|string_key| QWSMetaData::String(string_key.clone()))))
+///     }
+/// 
+///     fn meta_data_values_for_key_iter(&self, key : &QWSMetaData) -> Option<Box<dyn Iterator<Item=QWSMetaData> + '_>> {
+///         match key {
+///             QWSMetaData::String(string_key) => {
+///                 self.meta_data.get(string_key).map(|value| { 
+///                     Box::new(vec![QWSMetaData::String(value.clone())].into_iter()) as Box<dyn Iterator<Item=QWSMetaData> + '_>
+///                 })
+///             },
+///             _ => None
+///         }
+///     }
+/// 
+///     fn as_any(&self) -> &dyn Any {
+///         self
+///     }
+/// }
+/// ```
 pub trait QWSElement : core::fmt::Debug {
 
-    ///Returns the QWSElementType specifying what kind of element we're dealing with
+    ///Returns the QWSElementType specifying what kind of element we're dealing with BORIS Delete
     fn element_type(&self) -> QWSElementType;
 
-    ///Returns the element as a &dyn [Any](https://doc.rust-lang.org/nightly/core/any/trait.Any.html), from which you can use [downcast_ref()](https://doc.rust-lang.org/nightly/core/any/trait.Any.html#method.downcast_ref) to get to the original object
-    /// # Examples
+    ///Returns an iterator for the meta-data keys expressed by the element, in order to locate the element through queries.
+    /// 
+    /// # Warning
+    /// 
+    /// Currently any type that implements the [Eq](https://doc.rust-lang.org/core/cmp/trait.Eq.html) and [Hash](https://doc.rust-lang.org/std/hash/trait.Hash.html) traits can be used as a key.
+    /// However, we may want to limit it to [String](https://doc.rust-lang.org/std/string/struct.String.html) objects in the future for compatibility with other database backends.
+    /// 
+    // INTERNAL NOTE:
+    // I wanted a solution that didn't clone the MetaData structures (which might be strings), but the alternative
+    // was for the iterator type to return references to a QWSMetaData which was a pain in the butt if the internal format
+    // of the meta data isn't already in QWSMetaData format, because it makes format conversion inside the iterator impossible.
+    //I also tried to eliminate the copy by making the QWSMetaData capable of being a reference (See the MaybeOwnedString checkin
+    // in the git history.  But making such an elemental type have an explicit lifetime bound was gnarley in terms of extra
+    // complexity.  Ultimately the meta-data strings are probably going to be tiny, so I just accepted that we'll be copying
+    // them during iteration.
+    fn meta_data_keys_iter(&self) -> Option<Box<dyn Iterator<Item=QWSMetaData> + '_>>;
+
+    ///Returns an iterator for the meta-data values associated with the specified key.  This function returns an iterator because a key
+    /// may have multiple values
+    fn meta_data_values_for_key_iter(&self, key : &QWSMetaData) -> Option<Box<dyn Iterator<Item=QWSMetaData> + '_>>;
+
+    ///Returns the element as a &dyn [Any](https://doc.rust-lang.org/core/any/trait.Any.html), from which you can use [downcast_ref()](https://doc.rust-lang.org/nightly/core/any/trait.Any.html#method.downcast_ref) to get to the original object
+    /// # Example Usage
     ///
     /// ```
     /// # use quantum_world_state::*;
@@ -249,12 +369,67 @@ impl<'dyn_trait> dyn QWSElement + 'dyn_trait {
     }
 }
 
+
+// //BORIS I think I'll give up on using a dyn trait and go with an enum
+// //Thanks to the fine folks on this thread for help with the implementation of this object.
+// //https://users.rust-lang.org/t/workaround-for-hash-trait-not-being-object-safe/53332/5
+// pub trait QWSMetaData : core::fmt::Debug {
+//     fn as_any(&self) -> &dyn Any;
+//     fn dyn_hash(&self, state: &mut dyn Hasher);
+//     fn dyn_eq(&self, other: &dyn Any) -> bool;
+//     fn clone_box(&self) -> Box<dyn QWSMetaData + '_>;
+// }
+
+/// Expresses the bool value as a QWSMetaData type.  Equivalent to `QWSMetaData::Bool()`
+#[macro_export(local_inner_macros)]
+macro_rules! md_bool(
+    ($value:expr) => {
+        {
+            QWSMetaData::Bool($value)
+        }
+     };
+);
+
+/// Expresses the Integer value as a QWSMetaData type.  Equivalent to `QWSMetaData::Int()`
+#[macro_export(local_inner_macros)]
+macro_rules! md_int(
+    ($value:expr) => {
+        {
+            QWSMetaData::Int($value)
+        }
+     };
+);
+
+/// Expresses the String or &str value as a QWSMetaData type.  Equivalent to `QWSMetaData::String()`
+#[macro_export(local_inner_macros)]
+macro_rules! md_str(
+    ($value:expr) => {
+        {
+            QWSMetaData::String(String::from($value))
+        }
+     };
+);
+
+///An enum to represent a data type that can function as either a key or a value used by the meta-data search capabilities of the QWS
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub enum QWSMetaData {
+    ///An absent or invalid meta-data value
+    Null,
+    ///A Boolean meta-data value
+    Bool(bool),
+    ///An Integer meta-data value
+    Int(i64),
+    ///A String meta-data value
+    String(String),
+}
+
 ///A wrapper around any generic type to conveniently implement the [QWSElement](QWSElement) trait.  
 /// 
 ///In the future, I may allow extra keys to ride along, to provide metadata to help identify and locate the element.  
 #[derive(Debug)]
 pub struct QWSElementWrapper<T : core::fmt::Debug> {
-    element_type : QWSElementType,
+    element_type : QWSElementType, //BORIS DEAD
+    meta_data : Option<std::collections::HashMap<QWSMetaData, Vec<QWSMetaData>>>,
     payload : T
 }
 
@@ -274,6 +449,7 @@ pub enum QWSElementStatus {
     Unknown,
 }
 
+//BORIS, Get rid of QWSElementType, because it is just another type of meta-data
 ///Describes the type of element in the QuantumWorldState.
 ///
 ///Eventiually we'll make this something more flexible than an Enum, but an Enum is fine to get up and running
@@ -355,7 +531,7 @@ pub struct QWSDataView<'a> {
     quantum_world : &'a QuantumWorldState,
     collapsed_transactions : Vec<QWSTransactionID>,
     data_mask : QWSQueryMask,
-    query : Option<QWSQueryInternals>,
+    query : Option<QWSQueryInternals<'a>>,
     full_collapse_plan : Option<QWSFullCollapsePlan>,
 }
 
@@ -399,8 +575,13 @@ struct QWSTransactionRecord {
 #[derive(Debug)]
 struct QWSElementStore {
     table : Vec<QWSElementRecord>,   //The table that holds ownership of all of the elements in the QWS
-    types_index : std::collections::HashMap<QWSElementType, Vec<QWSElementID>>, //A table that maps each elementType to all of the
-        //individual elements that have that type
+    types_index : std::collections::HashMap<QWSElementType, std::collections::HashSet<QWSElementID>>, //A table that maps each elementType to all of the
+        //individual elements that have that type  BORIS DEAD
+    keys_index : std::collections::HashMap<QWSMetaData, std::collections::HashSet<QWSElementID>>, //A table to map metadata keys back to individual elements
+        //that express them.
+    key_value_index : std::collections::HashMap<QWSMetaData, std::collections::HashMap<QWSMetaData, std::collections::HashSet<QWSElementID>>> //A table to
+        //map metadata keys and values back to individual elements that express them.  It's a HashMap of HashMaps because each key
+        //may have multiple values and we may want to look up any unique key-value pair to get the elements that express it
 }
 
 //private: A struct that is used internally to hold onto the elements in the QuantumWorldState
@@ -414,8 +595,8 @@ struct QWSElementRecord {
 //  through the query results.
 //Since the only type of query we support is a simple "element_type matches a single value", this structure is more of a placeholder
 #[derive(Clone, Debug)]
-struct QWSQueryInternals {
-    query_by_type : QWSElementType
+struct QWSQueryInternals<'a> {
+    results_set : MaybeOwned<'a, std::collections::HashSet<QWSElementID>>,
 }
 
 //private: The internal status code associated with each element in each QWSQueryMask
@@ -535,12 +716,62 @@ struct QWSQueryMaskContents {
         //mask is NOT aware of TransactionID 0.  If consistent_to == 5, it means the mask is aware of transactionIDs 0 to 4.
 }
 
+//BORIS Giving up on trying to implement QWSMetaData with a boxed trait, and instead opting for an enum
+// #[macro_export(local_inner_macros)]
+// macro_rules! qws_md(
+//     ($value:expr) => {
+//         {
+//             &$value as &'static dyn QWSMetaData
+//         }
+//      };
+// );
+
+// impl Hash for dyn QWSMetaData {
+//     fn hash<H: Hasher>(&self, state: &mut H) {
+//         self.dyn_hash(state);
+//     }
+// }
+// impl PartialEq for dyn QWSMetaData {
+//     fn eq(&self, other: &dyn QWSMetaData) -> bool {
+//         QWSMetaData::dyn_eq(self, other.as_any())
+//     }
+// }
+// impl Eq for dyn QWSMetaData {}
+
+// impl <T : Hash + Eq + core::fmt::Debug>QWSMetaData for T {
+//     fn as_any(&self) -> &dyn Any {
+//         self
+//     }
+//     fn dyn_hash(&self, mut state: &mut dyn Hasher) {
+//         self.hash(&mut state);
+//     }
+//     fn dyn_eq(&self, other: &dyn Any) -> bool {
+//         if let Some(other) = other.downcast_ref::<Self>() {
+//             self == other
+//         } else {
+//             false
+//         }
+//     }
+//     fn clone_box(&self) -> Box<dyn QWSMetaData +'_> {
+//         Box::new(self.clone())
+//     }
+// }
+
 impl <T : core::fmt::Debug>QWSElementWrapper<T> {
 
     ///Returns a new QWSElementWrapper, taking ownership of the provided object
     pub fn new(element_type : QWSElementType, payload : T) -> QWSElementWrapper<T> {
         QWSElementWrapper {
+            meta_data : None,
             element_type : element_type,
+            payload : payload
+        }
+    }
+
+    pub fn new_with_metadata(metadata : std::collections::HashMap<QWSMetaData, Vec<QWSMetaData>>, payload : T) -> QWSElementWrapper<T> {
+        QWSElementWrapper {
+            meta_data : Some(metadata),
+            element_type : QWSElementType::Unspecified,
             payload : payload
         }
     }
@@ -556,6 +787,31 @@ impl  <T : 'static + core::fmt::Debug>QWSElement for QWSElementWrapper<T> {
     fn element_type(&self) -> QWSElementType {
         self.element_type
     }
+
+    fn meta_data_keys_iter(&self) -> Option<Box<dyn Iterator<Item=QWSMetaData> + '_>> {
+        if let Some(meta_data) = &self.meta_data {
+
+            let new_iter = meta_data.keys().cloned();
+            
+            Some(Box::new(new_iter))
+        } else {
+            None
+        }
+    }
+
+    fn meta_data_values_for_key_iter(&self, key : &QWSMetaData) -> Option<Box<dyn Iterator<Item=QWSMetaData> + '_>> {
+        if let Some(meta_data) = &self.meta_data {
+            if let Some(values_vec) = &meta_data.get(key) {
+
+                //See NOTE in meta_data_keys_iter
+                let new_iter = values_vec.into_iter().cloned();
+
+                return Some(Box::new(new_iter))
+            }
+        }
+        None
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -578,7 +834,9 @@ impl QWSElementStore {
     fn new() -> QWSElementStore {
         QWSElementStore{
             table : Vec::new(),
-            types_index : std::collections::HashMap::new()
+            types_index : std::collections::HashMap::new(),
+            keys_index : std::collections::HashMap::new(),
+            key_value_index : std::collections::HashMap::new()
         }
     }
 
@@ -599,10 +857,47 @@ impl QWSElementStore {
         for (index, element_record) in new_element_records.iter().enumerate() {
             let new_element_id = element_id_base + QWSElementID::from(index);
 
-            //Add it to the index for querying by type
+            //Add the element's metadata to the indices for querying
+            if let Some(keys_iter) = element_record.element.meta_data_keys_iter() {
+                for key in keys_iter {
+
+                    //Add the element to the keys index
+                    match self.keys_index.get_mut(&key) {
+                        Some(element_vec) => { element_vec.insert(new_element_id); },
+                        None => { self.keys_index.insert(key.clone(), hashset!{new_element_id}); },
+                    }
+        
+                    //Get the values iterator, or an empty one if the key didn't have an associated value
+                    let values_iter = if let Some(values_iter) = element_record.element.meta_data_values_for_key_iter(&key) {
+                        values_iter
+                    } else {
+                        Box::new([].iter().cloned())
+                    };
+                    
+                    //Get the reference to the map for the values on the relevant key
+                    let key_value_map = match self.key_value_index.get_mut(&key) {
+                        Some(key_index_map) => key_index_map,
+                        None => {
+                            self.key_value_index.insert(key.clone(), std::collections::HashMap::new());
+                            self.key_value_index.get_mut(&key).unwrap() //We won't panic because we added the value in the line above
+                        },
+                    };
+                    
+                    //Loop over the values
+                    for value in values_iter {
+                        //Add a reference to our element in the value 
+                        match key_value_map.get_mut(&value) {
+                            Some(element_vec) => { element_vec.insert(new_element_id); },
+                            None => { key_value_map.insert(value.clone(), hashset!{new_element_id}); },
+                        }
+                    }
+                }
+            }
+
+            //BORIS, Remove types_index
             match self.types_index.get_mut(&element_record.element.element_type()) {
-                Some(type_vec) => { type_vec.push(new_element_id); },
-                None => { self.types_index.insert(element_record.element.element_type(), vec![new_element_id]); },
+                Some(type_vec) => { type_vec.insert(new_element_id); },
+                None => { self.types_index.insert(element_record.element.element_type(), hashset!{new_element_id}); },
             }
         }
 
@@ -611,23 +906,12 @@ impl QWSElementStore {
     }
 
     //Get an iterator to go over the ID of every element in the QWSElementStore
-    fn iter_for_all_elements<'a>(&'a self) -> Box<dyn Iterator<Item=QWSElementID>+'a> {
+    fn iter_for_all_elements<'b>(&'b self) -> Box<dyn Iterator<Item=QWSElementID>+'b> {
         Box::new(self.table.iter().enumerate().map(|(index, _record)| QWSElementID::from(index)))
-    }
-    
-    //Get an iterator to go over the IDs for every element of a specified type
-    //NOTE: in the future, this is a pattern for how to extend to a general query
-    fn iter_for_elements_of_type<'a>(&'a self, element_type : QWSElementType) -> Box<dyn Iterator<Item=QWSElementID>+'a> {
-        let created_iter = match self.types_index.get(&element_type) {
-            Some(type_vec) => type_vec.iter().cloned(),
-            None => [].iter().cloned() //The slice operator is an exception to the general inability to return an empty iterator without it being boxed.  Nice :-)
-        };
-
-        Box::new(created_iter)
-    }
+    }    
 }
 
-impl std::ops::Index<QWSElementID> for QWSElementStore {
+impl <'a>std::ops::Index<QWSElementID> for QWSElementStore {
     type Output = QWSElementRecord;
 
     fn index(&self, idx : QWSElementID) -> &Self::Output {
@@ -1138,13 +1422,83 @@ impl <'a>QWSDataView<'a> {
 
         //Set the query internals object
         if self.query.is_none() {
-            self.query = Some(QWSQueryInternals{query_by_type : element_type});
+            if let Some(result_set) = self.quantum_world.elements.types_index.get(&element_type) {
+                self.query = Some(QWSQueryInternals{results_set : MaybeOwned::Borrowed(result_set)});    
+            } else {
+                self.query = Some(QWSQueryInternals{results_set : MaybeOwned::Owned(hashset!{})}); //The results are the empty set
+            }
             Ok(self)
         } else {
             Err(QWSError::MiscErr(format!("UNSUPPORTED: Attempt to specify multiple queries.  Currently only a single element type may be queried.")))
         }
     }
 
+    ///Returns a view that has been narrowed such that only elements with a key matching the supplied parameter will be visible from the view  
+    ///Regardless of whether or not this function was sucessful, the calling QWSDataView will be consumed.
+    pub fn query_contains_key(mut self, key : &QWSMetaData) -> Result<Self, QWSError> {
+        //Void the full collapse plan
+        self.full_collapse_plan = None;
+
+        //Set the query internals object
+        if self.query.is_none() {
+            if let Some(result_set) = self.quantum_world.elements.keys_index.get(key) {
+                self.query = Some(QWSQueryInternals{results_set : MaybeOwned::Borrowed(result_set)});    
+            } else {
+                self.query = Some(QWSQueryInternals{results_set : MaybeOwned::Owned(hashset!{})}); //The results are the empty set
+            }
+            Ok(self)
+        } else {
+            Err(QWSError::MiscErr(format!("UNSUPPORTED: Attempt to specify multiple queries.  Currently only a single query may be applied.")))
+        }
+    }
+
+    ///Returns a view that has been narrowed such that only elements with a key and value pair matching the supplied parameters will be visible from the view  
+    ///Regardless of whether or not this function was sucessful, the calling QWSDataView will be consumed.
+    pub fn query_key_equals_value(mut self, key : &QWSMetaData, value : &QWSMetaData) -> Result<Self, QWSError> {
+        //Void the full collapse plan
+        self.full_collapse_plan = None;
+
+        //Set the query internals object
+        if self.query.is_none() {
+
+            if let Some(key_table) = self.quantum_world.elements.key_value_index.get(key) {
+                if let Some(result_set) = key_table.get(value) {
+                    self.query = Some(QWSQueryInternals{results_set : MaybeOwned::Borrowed(result_set)});    
+                } else {
+                    self.query = Some(QWSQueryInternals{results_set : MaybeOwned::Owned(hashset!{})}); //The results are the empty set
+                }
+            } else {
+                self.query = Some(QWSQueryInternals{results_set : MaybeOwned::Owned(hashset!{})}) //This state means we have a valid query, but the query has no results
+            }
+            Ok(self)
+        } else {
+            Err(QWSError::MiscErr(format!("UNSUPPORTED: Attempt to specify multiple queries.  Currently only a single query may be applied.")))
+        }
+    }
+
+    ///Returns a view that has been narrowed such that only elements with QWSElementIDs from the provided slice will be visible from the view.  
+    ///This can be thought of as a "back door" to allow external logic to narrow down the query result set based on criteria aside from the meta-data.  
+    ///Regardless of whether or not this function was sucessful, the calling QWSDataView will be consumed.
+    ///
+    /// # NOTE
+    /// 
+    /// Elements outside the query set don't affect the fully collapsed states that will be visited when iterating the states accessible from a view.
+    /// Therefore it is advantageous to narrow the view's query set as much as possible prior to attempting to iterate over fully collapsed states.  
+    pub fn query_explicit_set(mut self, query_set : &[QWSElementID]) -> Result<Self, QWSError> {
+        //Void the full collapse plan
+        self.full_collapse_plan = None;
+
+        //Set the query internals object
+        if self.query.is_none() {
+
+            let owned_set = std::collections::HashSet::from_iter(query_set.iter().cloned());
+            self.query = Some(QWSQueryInternals{results_set : MaybeOwned::Owned(owned_set)});
+            Ok(self)
+        } else {
+            Err(QWSError::MiscErr(format!("UNSUPPORTED: Attempt to specify multiple queries.  Currently only a single query may be applied.")))
+        }
+    }
+    
     ///Returns new [QWSElementsIterator](QWSElementsIterator) to iterate over the elements visible from the view.  
     ///
     ///If the view has been narrowed by a query, only elements that match the query criteria will be visited, otherwise only the element status will affect
@@ -1161,10 +1515,14 @@ impl <'a>QWSDataView<'a> {
         }
     }
 
-    fn query_result_elements_iter(&self) -> Box<dyn Iterator<Item=QWSElementID>+'a> {
+    fn query_result_elements_iter(&'a self) -> Box<dyn Iterator<Item=QWSElementID>+'a> {
         //If we have a query, we want to iteate over the results of that query
         if let Some(query) = &self.query {
-            self.quantum_world.elements.iter_for_elements_of_type(query.query_by_type)
+            Box::new(query.results_set.iter().cloned())
+            // match query.results_set { //BORIS DEAD CODE, Option<&HashSet> was changed to MaybeOwned<HashSet>
+            //     Some(results_set) => Box::new(results_set.iter().cloned()),
+            //     None => Box::new([].iter().cloned()) //The slice operator is an exception to the general inability to return an empty iterator without it being boxed.  Nice :-)
+            // }
         } else {
             //If we don't have a query, we want to iterate over every element
             self.quantum_world.elements.iter_for_all_elements()
@@ -1599,10 +1957,84 @@ impl Display for QWSElementStatus {
 }
 
 // Tests
-
 #[cfg(test)]
-mod tests {
+mod tests {    
     use super::*;
+
+    #[test]
+    fn query_test() {
+        let mut quantum_world_state = QuantumWorldState::new();
+
+        //BORIS, decided to change QWSMetaData from dyn trait to an enum
+        // //Create the objects that we're going to add as elements
+        // let bob = QWSElementWrapper::new_with_metadata(hashmap!{
+        //     qws_md!("name") => vec![qws_md!("Bob Dog")], //A key-value pair
+        //     qws_md!("species") => vec![qws_md!("human"), qws_md!("dog")], //Multiple values can be provided for a key
+        //     qws_md!("num_hands") => vec![qws_md!(2)] //All 'static types that can implement Hash and Eq can be used as values
+        // }, "Bob's Payload");
+        // let fred = QWSElementWrapper::new_with_metadata(hashmap!{
+        //     qws_md!("name") => vec![qws_md!("Fred Rogers")],
+        //     qws_md!("ordinary_person") => vec![] //Keys without values can be thought of as tags
+        // }, "Fred's Payload");
+        // let daniel = QWSElementWrapper::new_with_metadata(hashmap!{
+        //     qws_md!("name") => vec![qws_md!("Daniel Tiger")],
+        //     qws_md!("is_puppet") => vec![qws_md!(false)]
+        // }, "Daniel's Payload");
+        // let _ = quantum_world_state.add_transaction(&[], &[], vec![Box::new(bob), Box::new(daniel), Box::new(fred)]);
+
+        //Create the objects that we're going to add as elements
+        let bob = QWSElementWrapper::new_with_metadata(hashmap!{
+            md_str!("name") => vec![md_str!("Bob Dog")], //A key-value pair
+            md_str!("species") => vec![md_str!("human"), md_str!("dog")], //Multiple values can be provided for a key
+            md_str!("num_hands") => vec![md_int!(2)] //All 'static types that can implement Hash and Eq can be used as values
+        }, "Bob's Payload");
+        let fred = QWSElementWrapper::new_with_metadata(hashmap!{
+            md_str!("name") => vec![md_str!("Fred Rogers")],
+            md_str!("ordinary_person") => vec![] //Keys without values can be thought of as tags
+        }, "Fred's Payload");
+        let daniel = QWSElementWrapper::new_with_metadata(hashmap!{
+            md_str!("name") => vec![md_str!("Daniel Tiger")],
+            md_str!("is_puppet") => vec![md_bool!(true)]
+        }, "Daniel's Payload");
+        let created_elements = quantum_world_state.add_transaction(&[], &[], vec![Box::new(bob), Box::new(fred), Box::new(daniel)]).unwrap().created_elements().to_vec();
+
+        //Try out some queries
+        //Start with a key query, for keys that have values, which should have 3 results
+        let query_view = quantum_world_state.new_view().query_contains_key(&md_str!("name")).unwrap();
+        let found_elements : Vec<QWSElementID> = query_view.elements_iter().collect();
+        assert_eq!(found_elements.len(), 3);
+
+        //Now try a key query for a key that doesn't have a value.  This query should have 1 result
+        let query_view = quantum_world_state.new_view().query_contains_key(&md_str!("ordinary_person")).unwrap();
+        let found_elements : Vec<QWSElementID> = query_view.elements_iter().collect();
+        assert_eq!(found_elements.len(), 1);
+
+        //Now try a query for a specific key-value pair
+        let query_view = quantum_world_state.new_view().query_key_equals_value(&md_str!("species"), &md_str!("human")).unwrap();
+        let found_elements : Vec<QWSElementID> = query_view.elements_iter().collect();
+        assert_eq!(found_elements.len(), 1);
+
+        //Try a query that returns no results, because there were no elements with a particular value for the specified key,
+        //  but where other elements included the key with a different value
+        let query_view = quantum_world_state.new_view().query_key_equals_value(&md_str!("name"), &md_str!("Lady Elaine Fairchild")).unwrap(); //species = demon!
+        let found_elements : Vec<QWSElementID> = query_view.elements_iter().collect();
+        assert_eq!(found_elements.len(), 0);
+
+        //Try a query that returns no results, because no elements used that key
+        let query_view = quantum_world_state.new_view().query_key_equals_value(&md_str!("is_demon"), &md_bool!(true)).unwrap();
+        let found_elements : Vec<QWSElementID> = query_view.elements_iter().collect();
+        assert_eq!(found_elements.len(), 0);
+
+        //Try inspecting the meta-data of an element in the QWS directly
+        //"Bob Dog" Should have 3 keys, and his "name" should be "Bob Dog"
+        assert_eq!(quantum_world_state.get_element(created_elements[0]).unwrap().meta_data_keys_iter().unwrap().count(), 3);
+        assert_eq!(quantum_world_state.get_element(created_elements[0]).unwrap().meta_data_values_for_key_iter(&md_str!("name")).unwrap().next().unwrap(), md_str!("Bob Dog"));
+
+        //Create an explicit query result set and test to make sure the query finds the elements we supplied
+        let query_view = quantum_world_state.new_view().query_explicit_set(&[created_elements[0], created_elements[2]]).unwrap();
+        let found_elements : Vec<QWSElementID> = query_view.elements_iter().collect();
+        assert_eq!(found_elements.len(), 2);
+    }
 
     #[test]
     fn simple_chain() {
