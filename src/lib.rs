@@ -40,18 +40,20 @@
 //! # Adding Some Elements and Transactions
 //!
 //! ```
+//! #[macro_use] extern crate maplit; 
 //! use quantum_world_state::*;
 //! let mut qws = QuantumWorldState::new();
 //! 
 //! // Create an object that will become our first element
-//! let forty_two_element = QWSElementWrapper::new(QWSElementType::Unspecified, 42);
+//! // MetaData keys without values function like tags
+//! let forty_two_element = QWSElementWrapper::new_with_metadata(hashmap!{md_str!("my_tag") => vec![]}, 42);
 //! 
 //! // Add it to the QWS with a new transaction, and get back the new ElementID
 //! let forty_two_id = qws.add_transaction(&[], &[], vec![Box::new(forty_two_element)])
 //!     .unwrap().created_elements()[0];
 //! 
 //! // Create another transaction that destroys 42 and adds 43
-//! qws.add_transaction(&[forty_two_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 43))]);
+//! qws.add_transaction(&[forty_two_id], &[], vec![Box::new(QWSElementWrapper::new_with_metadata(hashmap!{md_str!("my_tag") => vec![]}, 43))]);
 //! ```
 //! 
 //! # Queries and Views
@@ -64,12 +66,13 @@
 //! visible, and a query may limit the visible elements to the subset that match the query.
 //! 
 //! ```
+//! # #[macro_use] extern crate maplit; 
 //! # use quantum_world_state::*;
 //! # let mut qws = QuantumWorldState::new();
-//! # let forty_two_id = qws.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 42))]).unwrap().created_elements()[0];
-//! # qws.add_transaction(&[forty_two_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 43))]);
+//! # let forty_two_id = qws.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new_with_metadata(hashmap!{md_str!("my_tag") => vec![]}, 42))]).unwrap().created_elements()[0];
+//! # qws.add_transaction(&[forty_two_id], &[], vec![Box::new(QWSElementWrapper::new_with_metadata(hashmap!{md_str!("my_tag") => vec![]}, 43))]);
 //! // Get a view of the queried elements
-//! let query_view = qws.new_view().query_by_type(QWSElementType::Unspecified).unwrap();
+//! let query_view = qws.new_view().query_contains_key(&md_str!("my_tag")).unwrap();
 //! 
 //! // Iterate over the query results
 //! for element_id in query_view.elements_iter() {
@@ -85,11 +88,12 @@
 //! However the elements have a status of [Superposition](QWSElementStatus::Superposition), indicating that they may or may not exist.
 //! 
 //! ```
+//! # #[macro_use] extern crate maplit; 
 //! # use quantum_world_state::*;
 //! # let mut qws = QuantumWorldState::new();
-//! # let forty_two_id = qws.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 42))]).unwrap().created_elements()[0];
-//! # qws.add_transaction(&[forty_two_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 43))]);
-//! # let query_view = qws.new_view().query_by_type(QWSElementType::Unspecified).unwrap();
+//! # let forty_two_id = qws.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new_with_metadata(hashmap!{md_str!("my_tag") => vec![]}, 42))]).unwrap().created_elements()[0];
+//! # qws.add_transaction(&[forty_two_id], &[], vec![Box::new(QWSElementWrapper::new_with_metadata(hashmap!{md_str!("my_tag") => vec![]}, 43))]);
+//! # let query_view = qws.new_view().query_contains_key(&md_str!("my_tag")).unwrap();
 //! // We see that element 42 is in Superposition, in the query view we created above
 //! println!("status of 42 = {}", query_view.get_element_status(forty_two_id));
 //! ```
@@ -97,11 +101,12 @@
 //! In order to be sure an element exists, the view must be collapsed with respect to that element.  We do that with one of the `collapse_` methods of the [QWSDataView](QWSDataView).
 //! 
 //! ```
+//! # #[macro_use] extern crate maplit; 
 //! # use quantum_world_state::*;
 //! # let mut qws = QuantumWorldState::new();
-//! # let forty_two_id = qws.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 42))]).unwrap().created_elements()[0];
-//! # qws.add_transaction(&[forty_two_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 43))]);
-//! # let query_view = qws.new_view().query_by_type(QWSElementType::Unspecified).unwrap();
+//! # let forty_two_id = qws.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new_with_metadata(hashmap!{md_str!("my_tag") => vec![]}, 42))]).unwrap().created_elements()[0];
+//! # qws.add_transaction(&[forty_two_id], &[], vec![Box::new(QWSElementWrapper::new_with_metadata(hashmap!{md_str!("my_tag") => vec![]}, 43))]);
+//! # let query_view = qws.new_view().query_contains_key(&md_str!("my_tag")).unwrap();
 //! // Get the transaction id for the transaction that created element 42
 //! let transaction_id = qws.get_creator_transaction(forty_two_id).unwrap().id();
 //! 
@@ -220,50 +225,6 @@ use maybe_owned::*;
 
 #[macro_use] extern crate maplit;
 
-//BORIS DEAD.  Giving QWSMetaData a lifetime bound is just tangles things up too much.
-// What I wanted to do was to make it so that iterating keys that were strings didn't involve string copies.  But this just isn't worth the complexity introduced by putting a reference into QWSMetaData
-//
-// //Consider rolling this MaybeOwnedString and also MaybeOwnedVec out into its own utility library
-// //A variant on maybe_owned::MaybeOwned, except it can either be a Vec or a slice.
-// #[derive(Debug, Clone, Eq, PartialEq, Hash)]
-// pub enum MaybeOwnedString<'a> {
-//     Owned(String),
-//     Borrowed(&'a str),
-// }
-
-// impl <'a>MaybeOwnedString<'a> {
-
-//     pub fn from_str(the_str : &'a str) -> MaybeOwnedString<'a> {
-//         MaybeOwnedString::Borrowed(the_str)
-//     }
-
-//     pub fn from_string(the_string : String) -> MaybeOwnedString<'static> {
-//         MaybeOwnedString::Owned(the_string)
-//     }
-
-//     pub fn as_str(&self) -> &str {
-//         match self {
-//             MaybeOwnedString::Owned(the_string) => {
-//                 the_string.as_str()
-//             }
-//             MaybeOwnedString::Borrowed(the_str) => {
-//                 the_str
-//             }
-//         }
-//     }
-
-//     pub fn to_string(self) -> String {
-//         match self {
-//             MaybeOwnedString::Owned(the_string) => {
-//                 the_string
-//             }
-//             MaybeOwnedString::Borrowed(the_str) => {
-//                 the_str.to_string()
-//             }
-//         }
-//     }
-// }
-
 
 ///An element in the QuantumWorldState must implement this trait.  
 /// 
@@ -282,9 +243,6 @@ use maybe_owned::*;
 /// }
 /// 
 /// impl QWSElement for MyElementType {
-///     fn element_type(&self) -> QWSElementType {
-///         QWSElementType::Unspecified //BORIS DEAD
-///     }
 /// 
 ///     fn meta_data_keys_iter(&self) -> Option<Box<dyn Iterator<Item=QWSMetaData> + '_>> {
 ///         Some(Box::new(self.meta_data.keys().map(|string_key| QWSMetaData::String(string_key.clone()))))
@@ -307,9 +265,6 @@ use maybe_owned::*;
 /// }
 /// ```
 pub trait QWSElement : core::fmt::Debug {
-
-    ///Returns the QWSElementType specifying what kind of element we're dealing with BORIS Delete
-    fn element_type(&self) -> QWSElementType;
 
     ///Returns an iterator for the meta-data keys expressed by the element, in order to locate the element through queries.
     /// 
@@ -338,7 +293,7 @@ pub trait QWSElement : core::fmt::Debug {
     /// ```
     /// # use quantum_world_state::*;
     /// # let mut qws = QuantumWorldState::new();
-    /// # let element_id = qws.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 42))])
+    /// # let element_id = qws.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new(42))])
     /// #    .unwrap().created_elements()[0];
     /// # let found_element = qws.get_element(element_id).unwrap();
     /// # 
@@ -356,7 +311,7 @@ impl<'dyn_trait> dyn QWSElement + 'dyn_trait {
     /// ```
     /// # use quantum_world_state::*;
     /// # let mut qws = QuantumWorldState::new();
-    /// # let element_id = qws.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 42))])
+    /// # let element_id = qws.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new(42))])
     /// #    .unwrap().created_elements()[0];
     /// # let found_element = qws.get_element(element_id).unwrap();
     /// # 
@@ -368,17 +323,6 @@ impl<'dyn_trait> dyn QWSElement + 'dyn_trait {
         self.as_any().downcast_ref::<QWSElementWrapper<T>>().map(|element_wrapper| element_wrapper.payload())
     }
 }
-
-
-// //BORIS I think I'll give up on using a dyn trait and go with an enum
-// //Thanks to the fine folks on this thread for help with the implementation of this object.
-// //https://users.rust-lang.org/t/workaround-for-hash-trait-not-being-object-safe/53332/5
-// pub trait QWSMetaData : core::fmt::Debug {
-//     fn as_any(&self) -> &dyn Any;
-//     fn dyn_hash(&self, state: &mut dyn Hasher);
-//     fn dyn_eq(&self, other: &dyn Any) -> bool;
-//     fn clone_box(&self) -> Box<dyn QWSMetaData + '_>;
-// }
 
 /// Expresses the bool value as a QWSMetaData type.  Equivalent to `QWSMetaData::Bool()`
 #[macro_export(local_inner_macros)]
@@ -428,7 +372,6 @@ pub enum QWSMetaData {
 ///In the future, I may allow extra keys to ride along, to provide metadata to help identify and locate the element.  
 #[derive(Debug)]
 pub struct QWSElementWrapper<T : core::fmt::Debug> {
-    element_type : QWSElementType, //BORIS DEAD
     meta_data : Option<std::collections::HashMap<QWSMetaData, Vec<QWSMetaData>>>,
     payload : T
 }
@@ -447,28 +390,6 @@ pub enum QWSElementStatus {
     Superposition,
     ///The element has not yet been added to the [QuantumWorldState](QuantumWorldState) by any transaction
     Unknown,
-}
-
-//BORIS, Get rid of QWSElementType, because it is just another type of meta-data
-///Describes the type of element in the QuantumWorldState.
-///
-///Eventiually we'll make this something more flexible than an Enum, but an Enum is fine to get up and running
-///The internals of the QWS data structure don't care about what an element is at all.
-#[derive(Copy, Debug, Clone, Hash, Eq, PartialEq)]
-pub enum QWSElementType {
-    Unspecified,
-    GenericText,
-    DocumentHeight,
-    DocumentWidth,
-    MedianLineSpacing,
-    HorizontalWordCluster,
-    VerticalWordCluster,
-    LeftJustifiedWordColumn,
-    RightJustifiedWordColumn,
-    CenterJustifiedWordColumn,
-    Table,
-    Date,
-    DateFormatHint,
 }
 
 ///An index that uniquely identifies an element in a QuantumWorldState
@@ -575,8 +496,6 @@ struct QWSTransactionRecord {
 #[derive(Debug)]
 struct QWSElementStore {
     table : Vec<QWSElementRecord>,   //The table that holds ownership of all of the elements in the QWS
-    types_index : std::collections::HashMap<QWSElementType, std::collections::HashSet<QWSElementID>>, //A table that maps each elementType to all of the
-        //individual elements that have that type  BORIS DEAD
     keys_index : std::collections::HashMap<QWSMetaData, std::collections::HashSet<QWSElementID>>, //A table to map metadata keys back to individual elements
         //that express them.
     key_value_index : std::collections::HashMap<QWSMetaData, std::collections::HashMap<QWSMetaData, std::collections::HashSet<QWSElementID>>> //A table to
@@ -716,62 +635,21 @@ struct QWSQueryMaskContents {
         //mask is NOT aware of TransactionID 0.  If consistent_to == 5, it means the mask is aware of transactionIDs 0 to 4.
 }
 
-//BORIS Giving up on trying to implement QWSMetaData with a boxed trait, and instead opting for an enum
-// #[macro_export(local_inner_macros)]
-// macro_rules! qws_md(
-//     ($value:expr) => {
-//         {
-//             &$value as &'static dyn QWSMetaData
-//         }
-//      };
-// );
-
-// impl Hash for dyn QWSMetaData {
-//     fn hash<H: Hasher>(&self, state: &mut H) {
-//         self.dyn_hash(state);
-//     }
-// }
-// impl PartialEq for dyn QWSMetaData {
-//     fn eq(&self, other: &dyn QWSMetaData) -> bool {
-//         QWSMetaData::dyn_eq(self, other.as_any())
-//     }
-// }
-// impl Eq for dyn QWSMetaData {}
-
-// impl <T : Hash + Eq + core::fmt::Debug>QWSMetaData for T {
-//     fn as_any(&self) -> &dyn Any {
-//         self
-//     }
-//     fn dyn_hash(&self, mut state: &mut dyn Hasher) {
-//         self.hash(&mut state);
-//     }
-//     fn dyn_eq(&self, other: &dyn Any) -> bool {
-//         if let Some(other) = other.downcast_ref::<Self>() {
-//             self == other
-//         } else {
-//             false
-//         }
-//     }
-//     fn clone_box(&self) -> Box<dyn QWSMetaData +'_> {
-//         Box::new(self.clone())
-//     }
-// }
-
 impl <T : core::fmt::Debug>QWSElementWrapper<T> {
 
-    ///Returns a new QWSElementWrapper, taking ownership of the provided object
-    pub fn new(element_type : QWSElementType, payload : T) -> QWSElementWrapper<T> {
+    ///Returns a new QWSElementWrapper, taking ownership of the provided object.  The element will contain no meta-data, so it will only
+    /// be possible to retrieve the element with its [QWSElementID](QWSElementID) 
+    pub fn new(payload : T) -> QWSElementWrapper<T> {
         QWSElementWrapper {
             meta_data : None,
-            element_type : element_type,
             payload : payload
         }
     }
 
+    ///Returns a new QWSElementWrapper, taking ownership of the provided object and associated meta-data
     pub fn new_with_metadata(metadata : std::collections::HashMap<QWSMetaData, Vec<QWSMetaData>>, payload : T) -> QWSElementWrapper<T> {
         QWSElementWrapper {
             meta_data : Some(metadata),
-            element_type : QWSElementType::Unspecified,
             payload : payload
         }
     }
@@ -783,10 +661,6 @@ impl <T : core::fmt::Debug>QWSElementWrapper<T> {
 }
 
 impl  <T : 'static + core::fmt::Debug>QWSElement for QWSElementWrapper<T> {
-
-    fn element_type(&self) -> QWSElementType {
-        self.element_type
-    }
 
     fn meta_data_keys_iter(&self) -> Option<Box<dyn Iterator<Item=QWSMetaData> + '_>> {
         if let Some(meta_data) = &self.meta_data {
@@ -834,7 +708,6 @@ impl QWSElementStore {
     fn new() -> QWSElementStore {
         QWSElementStore{
             table : Vec::new(),
-            types_index : std::collections::HashMap::new(),
             keys_index : std::collections::HashMap::new(),
             key_value_index : std::collections::HashMap::new()
         }
@@ -892,12 +765,6 @@ impl QWSElementStore {
                         }
                     }
                 }
-            }
-
-            //BORIS, Remove types_index
-            match self.types_index.get_mut(&element_record.element.element_type()) {
-                Some(type_vec) => { type_vec.insert(new_element_id); },
-                None => { self.types_index.insert(element_record.element.element_type(), hashset!{new_element_id}); },
             }
         }
 
@@ -1047,7 +914,7 @@ impl QuantumWorldState {
     /// let mut qws = QuantumWorldState::new();
     /// 
     /// // Create a new element from the integer 42, entangling no other elements
-    /// let element_42 = Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 42));
+    /// let element_42 = Box::new(QWSElementWrapper::new(42));
     /// qws.add_transaction(&[], &[], vec![element_42]);
     /// ```
     pub fn add_transaction(&mut self,
@@ -1338,8 +1205,8 @@ impl <'a>QWSDataView<'a> {
     /// ```
     /// # use quantum_world_state::*;
     /// # let mut qws = QuantumWorldState::new();
-    /// # let el_a_id = qws.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 'a'))]).unwrap().created_elements()[0];
-    /// # qws.add_transaction(&[el_a_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 'b'))]).unwrap().created_elements()[0];
+    /// # let el_a_id = qws.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new('a'))]).unwrap().created_elements()[0];
+    /// # qws.add_transaction(&[el_a_id], &[], vec![Box::new(QWSElementWrapper::new('b'))]).unwrap().created_elements()[0];
     /// #
     /// fn recursive_collapse(current_view : &mut QWSDataView) {
     ///     let conflicting_transactions = current_view.get_conflicting_transactions().to_vec();
@@ -1396,8 +1263,8 @@ impl <'a>QWSDataView<'a> {
     /// ```
     /// # use quantum_world_state::*;
     /// # let mut qws = QuantumWorldState::new();
-    /// # let el_a_id = qws.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 'a'))]).unwrap().created_elements()[0];
-    /// # qws.add_transaction(&[el_a_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::Unspecified, 'b'))]).unwrap().created_elements()[0];
+    /// # let el_a_id = qws.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new('a'))]).unwrap().created_elements()[0];
+    /// # qws.add_transaction(&[el_a_id], &[], vec![Box::new(QWSElementWrapper::new('b'))]).unwrap().created_elements()[0];
     /// // Print the number of transactions in each fully-collapsed end-state view
     /// qws.new_view().visit_fully_collapsed_views(|collapsed_view : QWSDataView| {
     ///     println!("transaction count = {}", collapsed_view.get_collapsed_transactions().len());
@@ -1410,27 +1277,6 @@ impl <'a>QWSDataView<'a> {
     /// This function's implementation corresponds to the sample code in [get_conflicting_transactions](QWSDataView::get_conflicting_transactions)().
     pub fn visit_fully_collapsed_views<VisitorClosure: Fn(QWSDataView)>(&mut self, visitor_closure : VisitorClosure) {
         QWSDataView::recursive_collapse(self, &visitor_closure);
-    }
-
-    ///Returns a view that has been narrowed such that only elements whose type matches the supplied element_type parameter are visible
-    ///
-    ///Regardless of whether or not this function was sucessful, the calling QWSDataView will be consumed.
-    pub fn query_by_type(mut self, element_type : QWSElementType) -> Result<Self, QWSError> {
-
-        //Void the full collapse plan
-        self.full_collapse_plan = None;
-
-        //Set the query internals object
-        if self.query.is_none() {
-            if let Some(result_set) = self.quantum_world.elements.types_index.get(&element_type) {
-                self.query = Some(QWSQueryInternals{results_set : MaybeOwned::Borrowed(result_set)});    
-            } else {
-                self.query = Some(QWSQueryInternals{results_set : MaybeOwned::Owned(hashset!{})}); //The results are the empty set
-            }
-            Ok(self)
-        } else {
-            Err(QWSError::MiscErr(format!("UNSUPPORTED: Attempt to specify multiple queries.  Currently only a single element type may be queried.")))
-        }
     }
 
     ///Returns a view that has been narrowed such that only elements with a key matching the supplied parameter will be visible from the view  
@@ -1519,10 +1365,6 @@ impl <'a>QWSDataView<'a> {
         //If we have a query, we want to iteate over the results of that query
         if let Some(query) = &self.query {
             Box::new(query.results_set.iter().cloned())
-            // match query.results_set { //BORIS DEAD CODE, Option<&HashSet> was changed to MaybeOwned<HashSet>
-            //     Some(results_set) => Box::new(results_set.iter().cloned()),
-            //     None => Box::new([].iter().cloned()) //The slice operator is an exception to the general inability to return an empty iterator without it being boxed.  Nice :-)
-            // }
         } else {
             //If we don't have a query, we want to iterate over every element
             self.quantum_world.elements.iter_for_all_elements()
@@ -1965,23 +1807,6 @@ mod tests {
     fn query_test() {
         let mut quantum_world_state = QuantumWorldState::new();
 
-        //BORIS, decided to change QWSMetaData from dyn trait to an enum
-        // //Create the objects that we're going to add as elements
-        // let bob = QWSElementWrapper::new_with_metadata(hashmap!{
-        //     qws_md!("name") => vec![qws_md!("Bob Dog")], //A key-value pair
-        //     qws_md!("species") => vec![qws_md!("human"), qws_md!("dog")], //Multiple values can be provided for a key
-        //     qws_md!("num_hands") => vec![qws_md!(2)] //All 'static types that can implement Hash and Eq can be used as values
-        // }, "Bob's Payload");
-        // let fred = QWSElementWrapper::new_with_metadata(hashmap!{
-        //     qws_md!("name") => vec![qws_md!("Fred Rogers")],
-        //     qws_md!("ordinary_person") => vec![] //Keys without values can be thought of as tags
-        // }, "Fred's Payload");
-        // let daniel = QWSElementWrapper::new_with_metadata(hashmap!{
-        //     qws_md!("name") => vec![qws_md!("Daniel Tiger")],
-        //     qws_md!("is_puppet") => vec![qws_md!(false)]
-        // }, "Daniel's Payload");
-        // let _ = quantum_world_state.add_transaction(&[], &[], vec![Box::new(bob), Box::new(daniel), Box::new(fred)]);
-
         //Create the objects that we're going to add as elements
         let bob = QWSElementWrapper::new_with_metadata(hashmap!{
             md_str!("name") => vec![md_str!("Bob Dog")], //A key-value pair
@@ -2049,7 +1874,7 @@ mod tests {
 
         //Add an element, collapse around the element, and confirm it's KnownPresent
         //This tests that the transaction sucessfully added an element
-        let transaction = quantum_world_state.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "Zero"))]).unwrap();
+        let transaction = quantum_world_state.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new_with_metadata(hashmap!{md_str!("text") => vec![]}, "Zero"))]).unwrap();
         let &zero_id = transaction.created_elements().first().unwrap();
         let zero_trans_id = transaction.id();
         let collapsed_view = quantum_world_state.new_view().collapse_transactions(&vec![zero_trans_id]).unwrap();
@@ -2058,7 +1883,7 @@ mod tests {
         //Add element "One" through a transaction that deletes element "Zero"
         //Then collapse around element "One", and confirm that it's KnownPresent
         //This tests that we can sucessfully add a second element 
-        let transaction = quantum_world_state.add_transaction(&vec![zero_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "One"))]).unwrap();
+        let transaction = quantum_world_state.add_transaction(&vec![zero_id], &[], vec![Box::new(QWSElementWrapper::new_with_metadata(hashmap!{md_str!("text") => vec![]}, "One"))]).unwrap();
         let &one_id = transaction.created_elements().first().unwrap();
         let one_trans_id = transaction.id();
         let collapsed_view = quantum_world_state.new_view().collapse_transactions(&vec![one_trans_id]).unwrap();
@@ -2086,13 +1911,13 @@ mod tests {
         assert!(quantum_world_state.new_view().collapse_transactions(&vec![zero_trans_id, one_trans_id]).is_err(), "elements should not be allowed to coexist!");
 
         //Add a third element, "Two", that destroys element "One"
-        let transaction = quantum_world_state.add_transaction(&vec![one_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "Two"))]).unwrap();
+        let transaction = quantum_world_state.add_transaction(&vec![one_id], &[], vec![Box::new(QWSElementWrapper::new_with_metadata(hashmap!{md_str!("text") => vec![]}, "Two"))]).unwrap();
         let &two_id = transaction.created_elements().first().unwrap();
         let two_trans_id = transaction.id();
 
         //Confirm that when we query the collapsed state we only get the one result
         let collapsed_view = quantum_world_state.new_view().collapse_transactions(&vec![two_trans_id]).unwrap();
-        let queried_view = collapsed_view.query_by_type(QWSElementType::GenericText).unwrap();
+        let queried_view = collapsed_view.query_contains_key(&md_str!("text")).unwrap();
         let found_elements : Vec<QWSElementID> = queried_view.elements_iter().collect();
         assert_eq!(found_elements.len(), 1);
         assert_eq!(two_id, found_elements[0]);
@@ -2103,17 +1928,17 @@ mod tests {
         let mut quantum_world_state = QuantumWorldState::new();
 
         //Add two parallel chains of elements with no entanglement between them
-        let &a1_id = quantum_world_state.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A1"))])
+        let &a1_id = quantum_world_state.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new("A1"))])
             .unwrap().created_elements().first().unwrap();
-        let &a2_id = quantum_world_state.add_transaction(&vec![a1_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A2"))])
+        let &a2_id = quantum_world_state.add_transaction(&vec![a1_id], &[], vec![Box::new(QWSElementWrapper::new("A2"))])
             .unwrap().created_elements().first().unwrap();
-        let &a3_id = quantum_world_state.add_transaction(&vec![a2_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A3"))])
+        let &a3_id = quantum_world_state.add_transaction(&vec![a2_id], &[], vec![Box::new(QWSElementWrapper::new("A3"))])
             .unwrap().created_elements().first().unwrap();
-        let &b1_id = quantum_world_state.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "B1"))])
+        let &b1_id = quantum_world_state.add_transaction(&[], &[], vec![Box::new(QWSElementWrapper::new("B1"))])
             .unwrap().created_elements().first().unwrap();
-        let &b2_id = quantum_world_state.add_transaction(&vec![b1_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "B2"))])
+        let &b2_id = quantum_world_state.add_transaction(&vec![b1_id], &[], vec![Box::new(QWSElementWrapper::new("B2"))])
             .unwrap().created_elements().first().unwrap();
-        let &b3_id = quantum_world_state.add_transaction(&vec![b2_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "B3"))])
+        let &b3_id = quantum_world_state.add_transaction(&vec![b2_id], &[], vec![Box::new(QWSElementWrapper::new("B3"))])
             .unwrap().created_elements().first().unwrap();
 
         //Partially collapse around A3, and confirm the other elements are in the state we'd expect
@@ -2172,16 +1997,16 @@ mod tests {
 
         //Add two co-created elements
         let t0_id = quantum_world_state.add_transaction(&[], &[], vec![
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A1")),
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "B1")),
+            Box::new(QWSElementWrapper::new("A1")),
+            Box::new(QWSElementWrapper::new("B1")),
             ]).unwrap().id();
         let transaction = quantum_world_state.get_transaction(t0_id).unwrap();
         let (a1_id, b1_id) = (transaction.created_elements()[0], transaction.created_elements()[1]);
         
         //Add element A2 that destroys A1, and element B2 that destroys b1, in separate transactions.  B2 and A2 shouldn't be entangled with each other
-        let &a2_id = quantum_world_state.add_transaction(&vec![a1_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A2"))])
+        let &a2_id = quantum_world_state.add_transaction(&vec![a1_id], &[], vec![Box::new(QWSElementWrapper::new("A2"))])
             .unwrap().created_elements().first().unwrap();
-        let &b2_id = quantum_world_state.add_transaction(&vec![b1_id], &[], vec![Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "B2"))])
+        let &b2_id = quantum_world_state.add_transaction(&vec![b1_id], &[], vec![Box::new(QWSElementWrapper::new("B2"))])
             .unwrap().created_elements().first().unwrap();
         
         //Just a sanity check, collapse the first transaction and confirm the other elements are in the state we'd expect
@@ -2208,7 +2033,7 @@ mod tests {
         assert_eq!(collapsed_view.get_element_status(b2_id), QWSElementStatus::KnownPresent);
 
         //Create T3, entangling A2 & B2, and confirm everything is the way it ought to be
-        let t3_id = quantum_world_state.add_transaction(&vec![], &[a2_id, b2_id], vec![Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "C1"))])
+        let t3_id = quantum_world_state.add_transaction(&vec![], &[a2_id, b2_id], vec![Box::new(QWSElementWrapper::new("C1"))])
             .unwrap().id();
         let c1_id = quantum_world_state.get_transaction(t3_id).unwrap().created_elements()[0];
         let collapsed_view = quantum_world_state.new_view().collapse_transactions(&vec![t3_id]).unwrap();
@@ -2235,19 +2060,19 @@ mod tests {
 
         //Add an element to get things started
         let t0_id = quantum_world_state.add_transaction(&[], &[], vec![
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A1")),
+            Box::new(QWSElementWrapper::new("A1")),
             ]).unwrap().id();
         let a1_id = quantum_world_state.get_transaction(t0_id).unwrap().created_elements()[0];
     
         //Now Add B1 that deletes A1
         let t1_id = quantum_world_state.add_transaction(&[a1_id], &[], vec![
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "B1")),
+            Box::new(QWSElementWrapper::new("B1")),
             ]).unwrap().id();
         let b1_id = quantum_world_state.get_transaction(t1_id).unwrap().created_elements()[0];
 
         //Here's the twist, Add C1 that deletes A1 (Not B1).  This should mean that, in effect, B1 & C1 are mutually exclusive
         let t2_id = quantum_world_state.add_transaction(&[a1_id], &[], vec![
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "C1")),
+            Box::new(QWSElementWrapper::new("C1")),
             ]).unwrap().id();
         let c1_id = quantum_world_state.get_transaction(t2_id).unwrap().created_elements()[0];
         
@@ -2273,7 +2098,7 @@ mod tests {
 
         //Now Create C2, that deletes C1
         let t3_id = quantum_world_state.add_transaction(&[c1_id], &[], vec![
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "C2")),
+            Box::new(QWSElementWrapper::new("C2")),
             ]).unwrap().id();
         let c2_id = quantum_world_state.get_transaction(t3_id).unwrap().created_elements()[0];
         
@@ -2286,7 +2111,7 @@ mod tests {
 
         //Now Create D1, forking again from T0 by deleting A1
         let t4_id = quantum_world_state.add_transaction(&[a1_id], &[], vec![
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "D1")),
+            Box::new(QWSElementWrapper::new("D1")),
             ]).unwrap().id();
         let d1_id = quantum_world_state.get_transaction(t4_id).unwrap().created_elements()[0];
 
@@ -2322,13 +2147,13 @@ mod tests {
 
         //Finally, test that we also cannot create a transaction based on conflicting entangled elements
         assert!(quantum_world_state.add_transaction(&[a1_id], &[b1_id], vec![
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "Bogus")),
+            Box::new(QWSElementWrapper::new("Bogus")),
             ]).is_err(), "transaction should be impossible to create!");
         assert!(quantum_world_state.add_transaction(&[], &[b1_id, c1_id], vec![
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "Bogus")),
+            Box::new(QWSElementWrapper::new("Bogus")),
             ]).is_err(), "transaction should be impossible to create!");
         assert!(quantum_world_state.add_transaction(&[c2_id, d1_id], &[], vec![
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "Bogus")),
+            Box::new(QWSElementWrapper::new("Bogus")),
             ]).is_err(), "transaction should be impossible to create!");
     }
 
@@ -2346,29 +2171,29 @@ mod tests {
         // T4 | Entangle B2, Create B3       | T2            |  Ap  Ap  Ap  Ap  P   P
 
         let transaction = quantum_world_state.add_transaction(&[], &[], vec![
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A1")),
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "B1")),
+            Box::new(QWSElementWrapper::new("A1")),
+            Box::new(QWSElementWrapper::new("B1")),
             ]).unwrap();
         let t0_id = transaction.id();
         let (a1_id, b1_id) = (transaction.created_elements()[0], transaction.created_elements()[1]);
     
         let t1_id = quantum_world_state.add_transaction(&[a1_id, b1_id], &[], vec![
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A2")),
+            Box::new(QWSElementWrapper::new("A2")),
             ]).unwrap().id();
         let a2_id = quantum_world_state.get_transaction(t1_id).unwrap().created_elements()[0];
 
         let t2_id = quantum_world_state.add_transaction(&[a1_id, b1_id], &[], vec![
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "B2")),
+            Box::new(QWSElementWrapper::new("B2")),
             ]).unwrap().id();
         let b2_id = quantum_world_state.get_transaction(t2_id).unwrap().created_elements()[0];
 
         let t3_id = quantum_world_state.add_transaction(&[], &[a2_id], vec![
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A3")),
+            Box::new(QWSElementWrapper::new("A3")),
             ]).unwrap().id();
         let a3_id = quantum_world_state.get_transaction(t3_id).unwrap().created_elements()[0];
 
         let t4_id = quantum_world_state.add_transaction(&[], &[b2_id], vec![
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "B3")),
+            Box::new(QWSElementWrapper::new("B3")),
             ]).unwrap().id();
         let b3_id = quantum_world_state.get_transaction(t4_id).unwrap().created_elements()[0];
 
@@ -2437,29 +2262,29 @@ mod tests {
         // T4 | Entangle B2, Create B3       | T3            |  S   S   S   Ap  P   P
 
         let transaction = quantum_world_state.add_transaction(&[], &[], vec![
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A1")),
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "B1")),
+            Box::new(QWSElementWrapper::new("A1")),
+            Box::new(QWSElementWrapper::new("B1")),
             ]).unwrap();
         let t0_id = transaction.id();
         let (a1_id, b1_id) = (transaction.created_elements()[0], transaction.created_elements()[1]);
     
         let t1_id = quantum_world_state.add_transaction(&[a1_id], &[], vec![
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A2")),
+            Box::new(QWSElementWrapper::new("A2")),
             ]).unwrap().id();
         let a2_id = quantum_world_state.get_transaction(t1_id).unwrap().created_elements()[0];
 
         let t2_id = quantum_world_state.add_transaction(&[], &[a2_id], vec![
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "A3")),
+            Box::new(QWSElementWrapper::new("A3")),
             ]).unwrap().id();
         let a3_id = quantum_world_state.get_transaction(t2_id).unwrap().created_elements()[0];
 
         let t3_id = quantum_world_state.add_transaction(&[b1_id], &[], vec![
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "B2")),
+            Box::new(QWSElementWrapper::new("B2")),
             ]).unwrap().id();
         let b2_id = quantum_world_state.get_transaction(t3_id).unwrap().created_elements()[0];
 
         let t4_id = quantum_world_state.add_transaction(&[], &[b2_id], vec![
-            Box::new(QWSElementWrapper::new(QWSElementType::GenericText, "B3")),
+            Box::new(QWSElementWrapper::new("B3")),
             ]).unwrap().id();
         let b3_id = quantum_world_state.get_transaction(t4_id).unwrap().created_elements()[0];
 
