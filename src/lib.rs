@@ -339,7 +339,7 @@ macro_rules! md_bool(
 macro_rules! md_int(
     ($value:expr) => {
         {
-            QWSMetaData::Int($value)
+            QWSMetaData::Int($value as i64)
         }
      };
 );
@@ -1152,7 +1152,7 @@ impl <'a>QWSDataView<'a> {
         Ok(self)
     }
 
-    ///Returns flase if the specified other_view can be collapsed into the view without any conflicts.
+    ///Returns false if the specified other_view can be collapsed into the view without any conflicts.
     /// Returns true if an attempt to collapse will fail.
     pub fn conflicts_with(&self, other_view : &QWSDataView) -> bool {
 
