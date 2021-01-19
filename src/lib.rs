@@ -11,15 +11,16 @@
 //! and the [Copenhagen Interpretation](https://en.wikipedia.org/wiki/Copenhagen_interpretation) provide useful insights, but they are only metaphores and thus have limits.
 //! 
 //! # Overview
-//! The two fundamantal data objects in the QuantumWorldState are Elements and Transactions.
+//! The two fundamantal concepts in the QuantumWorldState are Elements and Transactions.
 //! 
 //! Each element can be thought of as a database record.  An element can be any Rust type that implements the [QWSElement](QWSElement) trait, but ownership of the object must be given to the QWS.
-//! An element must have a specified type which is a searchable field.  Each element is assigned a unique [QWSElementID](QWSElementID) that can always be used to locate that element in the world.
+//! Each element is assigned a unique [QWSElementID](QWSElementID) that can always be used to locate that element in the world.
 //! The QWS is an *append-only* data store, so you cannot modify an element after it has been added to the world, but a
 //! transaction may delete a given element and replace it with a newer version.  Each version of the element will
 //! have its own unique QWSElementID.
 //! 
-//! In the future we may extend the query functionality so that elements can also specify arbitrary queryable meta-data values.
+//! Elements may also supply meta-data values, that can be used to locate the elements through queries.  Currently the query semantics are limited
+//! but they may be extended in the future.
 //! 
 //! The append-only nature means that the history of the data structure is preserved immutably.  It is possible to destroy an element with
 //! a transaction, and that effectively removes the element from a branch representing one possible reality, but an alternate history in
@@ -199,7 +200,7 @@
 //!
 //!Another (non-exclusive) path to consider is a database that supports data-flow programs where the Mask that dictates
 //! the status of each element at a given epoch can actually be a dataflow program to update a materialized view.
-//!When we get to this stage, consider looking at Noria Database, as well as the TimelyDataflow Rust crate.
+//!When we get to this stage, consider looking at Noria Database, as well as the "timely" Dataflow Rust crate.
 //!
 //!Finally, as another alternative, it's likely that the Immutable HashSets that I'm using to store the mask are actually
 //! not the best performing data structure for this use case.  Specifically, we know our sets only store numerical IDs
