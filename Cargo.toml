@@ -13,9 +13,9 @@ categories = ["algorithms", "data-structures", ]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-maybe-owned = "*"
-maplit = "*"
-smallvec = "*"
-derive_more = "*"
-im = "*"
+maybe-owned = "0.3.4"
+maplit = "1.0.2"
+smallvec = "1.9.0"
+derive_more = "0.99.11"
+im = "15.1.0"
 
