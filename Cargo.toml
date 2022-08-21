@@ -3,6 +3,12 @@ name = "quantum_world_state"
 version = "0.1.0"
 authors = ["Luke Peterson <luke@infoplatter.com>"]
 edition = "2018"
+license = "MIT OR Apache-2.0"
+description = "in-ram database with relationships between elements inspired by quantum superposition and entanglement"
+repository = "https://github.com/luketpeterson/quantum_world_state/"
+readme = "README.md"
+keywords = ["algorithm", "superposition", "quantum", "exploration"]
+categories = ["algorithms", "data-structures", ]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
